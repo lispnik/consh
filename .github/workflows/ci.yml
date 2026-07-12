@@ -17,11 +17,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install SBCL
+      - name: Install SBCL and ocicl
         run: |
+          # ocicl ships a signed apt repo for x86_64 Debian/Ubuntu.
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends sbcl
+          sudo apt-get install -y --no-install-recommends sbcl curl
+          curl -fsSL https://ocicl.github.io/ocicl/deb-repo/ocicl-archive-keyring.gpg \
+            | sudo tee /usr/share/keyrings/ocicl-archive-keyring.asc > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/ocicl-archive-keyring.asc] https://ocicl.github.io/ocicl/deb-repo stable main" \
+            | sudo tee /etc/apt/sources.list.d/ocicl.list
+          sudo apt-get update
+          sudo apt-get install -y ocicl
+          ocicl setup
           sbcl --version
+          ocicl version
 
       # ocicl.csv pins the dependency versions; cache the fetched sources so
       # `ocicl install` is a no-op restore when the lockfile is unchanged.
@@ -30,14 +39,6 @@ jobs:
         with:
           path: ocicl
           key: ocicl-${{ runner.os }}-${{ hashFiles('ocicl.csv') }}
-
-      - name: Install ocicl
-        run: |
-          git clone --depth 1 https://github.com/ocicl/ocicl.git /tmp/ocicl
-          make -C /tmp/ocicl
-          sudo make -C /tmp/ocicl install
-          ocicl setup
-          ocicl version
 
       - name: Restore dependencies (from ocicl.csv)
         run: ocicl install
