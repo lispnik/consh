@@ -214,6 +214,11 @@ workers (parked at their next channel op via a shared stop-flag):
 => ("a" "b" "c")
 ```
 
+A background job's output goes into a **bounded ring buffer** (scrollback), so an
+unbounded producer like `yes &` keeps only the most recent objects instead of
+growing without limit; `job-output-dropped` reports how many were shed. Each
+external's stderr is drained fully (no deadlock) but retained up to a cap.
+
 The headline: an **unhandled condition in a worker parks the job instead of
 crashing it**, with the stack — and therefore all restarts — intact. You inspect
 it at the prompt and `debug-job` resumes the frozen line end-to-end, running the

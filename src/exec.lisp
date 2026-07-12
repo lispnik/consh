@@ -118,6 +118,29 @@ so it is closed once, via the stream."
     (push s (run-state-streams state))
     s))
 
+(defvar *stderr-capture-limit* 65536
+  "Max characters of a stage's stderr retained for parse-error-output.  The rest
+is still read (so the process never blocks on a full stderr pipe) but discarded,
+bounding memory for a stderr-flooding process.")
+
+(defun %drain-capped (stream limit)
+  "Read STREAM to EOF — draining the pipe so the process cannot deadlock on a
+full stderr buffer — while retaining at most LIMIT characters.  Returns the
+retained text (with a marker if it overran)."
+  (let ((out (make-string-output-stream)) (kept 0) (truncated nil))
+    (loop for line = (read-line stream nil nil)
+          while line do
+            (if (>= kept limit)
+                (setf truncated t)                    ; keep draining, discard
+                (let ((need (1+ (length line)))       ; line + newline
+                      (room (- limit kept)))
+                  (if (<= need room)
+                      (progn (write-line line out) (incf kept need))
+                      (progn (write-string line out :end (max 0 room))
+                             (setf kept limit truncated t))))))
+    (let ((s (get-output-stream-string out)))
+      (if truncated (concatenate 'string s "[...stderr truncated...]") s))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Running an external group (a maximal run of external stages)
 ;;; ---------------------------------------------------------------------------
@@ -191,7 +214,8 @@ stage's stdout is parsed into the returned object-seq.  Updates STATE."
                  (setf (ext-record-stderr-stream r) stream)
                  (push (spawn-stage-thread
                         (lambda ()
-                          (setf (ext-record-stderr-text r) (slurp-stream stream)))
+                          (setf (ext-record-stderr-text r)
+                                (%drain-capped stream *stderr-capture-limit*)))
                         :name "consh-stderr")
                        (run-state-drainer-threads state))))
       ;; --- unparse pump: feed the first stage's stdin from INPUT-SEQ ---

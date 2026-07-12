@@ -147,6 +147,19 @@ because stderr is drained concurrently."
       (is (search "oops" (command-failed-stderr failure))))
     (consh::%teardown (pipeline-result-state r))))
 
+(test stderr-capture-is-bounded
+  "A stderr flood (>100 KB) is fully drained (no deadlock) but only a bounded
+amount is retained for the failure condition."
+  (let ((r (run-pipeline
+            (make-pipeline
+             (list (external "sh" "-c"
+                             "i=0; while [ $i -lt 10000 ]; do echo errline$i 1>&2; i=$((i+1)); done; exit 2")))
+            :on-failure :collect)))
+    (pipeline-collect r)                                  ; completes -> no deadlock
+    (let ((stderr (command-failed-stderr (consh::%first-failure r))))
+      (is (<= (length stderr) (+ consh::*stderr-capture-limit* 64)))
+      (is (search "truncated" stderr)))))
+
 ;;; ===========================================================================
 ;;; :on-failure modes and restart-stage
 ;;; ===========================================================================

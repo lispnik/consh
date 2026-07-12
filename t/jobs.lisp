@@ -277,3 +277,44 @@ buffered (upstream frozen by backpressure)."
     (is-true (poll-until (lambda () (= 2 (length (job-output-list j))))))
     (is (equal (list (cons "a" "1") (cons "b" "2")) (job-output-list j)))
     (kill-job j)))
+
+;;; ===========================================================================
+;;; Bounded output: the ring buffer (SPEC §6) — `yes &` must not OOM
+;;; ===========================================================================
+
+(test ring-buffer-under-capacity-keeps-all
+  (let ((rb (make-ring-buffer 5)))
+    (dotimes (i 3) (ring-push rb i))
+    (is (equal '(0 1 2) (ring-list rb)))
+    (is (= 3 (ring-buffer-count rb)))
+    (is (= 0 (ring-buffer-dropped rb)))))
+
+(test ring-buffer-drops-oldest-when-full
+  (let ((rb (make-ring-buffer 3)))
+    (dotimes (i 7) (ring-push rb i))
+    (is (equal '(4 5 6) (ring-list rb)))              ; only the last 3 survive
+    (is (= 3 (ring-buffer-count rb)))
+    (is (= 4 (ring-buffer-dropped rb)))))
+
+(test ring-buffer-capacity-one
+  (let ((rb (make-ring-buffer 1)))
+    (ring-push rb :a)
+    (ring-push rb :b)
+    (is (equal '(:b) (ring-list rb)))
+    (is (= 1 (ring-buffer-dropped rb)))))
+
+(test finite-job-keeps-full-output-and-drops-nothing
+  (let ((j (run-job (make-pipeline (list (lines-job-cmd "a" "b" "c"))) :background t)))
+    (is (equal '("a" "b" "c") (fg j)))
+    (is (= 0 (job-output-dropped j)))))
+
+(test background-job-output-is-bounded
+  "An unbounded producer (`yes`) keeps only the last BUFFER-CAPACITY objects and
+counts the rest as dropped — bounded memory, no OOM."
+  (let ((j (run-job (make-pipeline (list (external "yes")))
+                    :background t :buffer-capacity 16)))
+    (sleep 0.2)
+    (kill-job j)
+    (is (<= (length (job-output-list j)) 16))
+    (is (> (job-output-dropped j) 0))
+    (is (every (lambda (x) (equal x "y")) (job-output-list j)))))

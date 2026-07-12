@@ -110,7 +110,10 @@
    ;; ---- Phase 5: jobs + cross-thread conditions ----
    #:*channel-stop-flag* #:*worker-error-hook*
    #:job #:job-id #:job-pipeline #:job-result #:job-state #:job-background-p
-   #:job-on-failure #:job-stop-flag #:job-output-list #:job-complete-p
+   #:job-on-failure #:job-stop-flag #:job-output-list #:job-output-dropped
+   #:job-complete-p #:*default-job-buffer-capacity*
+   #:ring-buffer #:make-ring-buffer #:ring-push #:ring-list
+   #:ring-buffer-capacity #:ring-buffer-count #:ring-buffer-dropped
    #:job-events #:job-parked #:job-restarts
    #:run-job #:wait-job #:find-job #:all-jobs #:register-job
    #:fg #:bg #:stop-job #:continue-job #:kill-job

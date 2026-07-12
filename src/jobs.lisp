@@ -15,6 +15,49 @@
 (in-package #:consh)
 
 ;;; ---------------------------------------------------------------------------
+;;; Bounded ring buffer (scrollback for background job output)
+;;; ---------------------------------------------------------------------------
+;;;
+;;; A background job's output must not accumulate without limit — `yes &` would
+;;; otherwise OOM (SPEC §6: "tees to ring buffer").  The sink keeps the most
+;;; recent CAPACITY objects, dropping the oldest, and remembers how many it
+;;; dropped.
+
+(defvar *default-job-buffer-capacity* 65536
+  "Default number of objects a background job's output ring retains.")
+
+(defstruct (ring-buffer (:constructor %make-ring-buffer (capacity data)))
+  (capacity 0 :type fixnum :read-only t)
+  (data nil :type simple-vector)
+  (head 0 :type fixnum)                 ; index of the oldest live element
+  (count 0 :type fixnum)                ; number of live elements
+  (dropped 0 :type fixnum))             ; total elements dropped on overflow
+
+(defun make-ring-buffer (capacity)
+  (check-type capacity (integer 1))
+  (%make-ring-buffer capacity (make-array capacity :initial-element nil)))
+
+(defun ring-push (ring item)
+  "Append ITEM.  When full, overwrite the oldest element and count it dropped."
+  (let ((cap (ring-buffer-capacity ring)))
+    (if (< (ring-buffer-count ring) cap)
+        (setf (svref (ring-buffer-data ring)
+                     (mod (+ (ring-buffer-head ring) (ring-buffer-count ring)) cap))
+              item
+              (ring-buffer-count ring) (1+ (ring-buffer-count ring)))
+        (setf (svref (ring-buffer-data ring) (ring-buffer-head ring)) item
+              (ring-buffer-head ring) (mod (1+ (ring-buffer-head ring)) cap)
+              (ring-buffer-dropped ring) (1+ (ring-buffer-dropped ring)))))
+  item)
+
+(defun ring-list (ring)
+  "The retained elements, oldest first."
+  (let ((cap (ring-buffer-capacity ring)))
+    (loop for i below (ring-buffer-count ring)
+          collect (svref (ring-buffer-data ring)
+                         (mod (+ (ring-buffer-head ring) i) cap)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Job objects and registry
 ;;; ---------------------------------------------------------------------------
 
@@ -27,7 +70,8 @@
    (background :initarg :background :initform t :accessor job-background-p)
    (on-failure :initarg :on-failure :initform :collect :reader job-on-failure)
    (stop-flag  :initarg :stop-flag :reader job-stop-flag)
-   (output      :initform (make-array 0 :adjustable t :fill-pointer 0) :accessor job-output)
+   (output      :initarg :output :accessor job-output
+                :documentation "A bounded ring-buffer of the job's output objects.")
    (buffer-lock :initform (sb-thread:make-mutex :name "job-buffer") :reader job-buffer-lock)
    (sink-thread :initform nil :accessor job-sink-thread)
    (complete    :initform nil :accessor job-complete-p)
@@ -161,13 +205,16 @@ worker declines and the condition propagates."
 ;;; ---------------------------------------------------------------------------
 
 (defun run-job (pipeline &key (on-failure :collect) (on-parse-error :use-raw-lines)
-                              input (background t))
+                              input (background t)
+                              (buffer-capacity *default-job-buffer-capacity*))
   "Run PIPELINE as a job.  The pipeline's channels share the job's stop-flag and
 its workers install the park hook, then a sink thread drains output into the
-job's buffer so the job progresses in the background."
+job's bounded ring buffer (BUFFER-CAPACITY objects) so the job progresses in the
+background without unbounded memory growth."
   (let* ((sf (make-stop-flag))
          (job (make-instance 'job :id (%next-job-id) :pipeline pipeline
-                             :stop-flag sf :on-failure on-failure :background background)))
+                             :stop-flag sf :on-failure on-failure :background background
+                             :output (make-ring-buffer buffer-capacity))))
     (register-job job)
     ;; Bind the shared stop-flag and park hook while the pipeline (and thus its
     ;; channels and worker threads) are created, so both propagate everywhere.
@@ -187,7 +234,7 @@ job's buffer so the job progresses in the background."
            (unwind-protect
                 (do-object-seq (obj (pipeline-result-seq (job-result job)))
                   (sb-thread:with-mutex ((job-buffer-lock job))
-                    (vector-push-extend obj (job-output job))))
+                    (ring-push (job-output job) obj)))
              (%mark-complete job)))
          :name "consh-job-sink")))
 
@@ -205,10 +252,17 @@ job's buffer so the job progresses in the background."
   (%post-event job (format nil "job ~D done" (job-id job))))
 
 (defun job-output-list (job)
-  "A snapshot of the output buffered so far, in order."
+  "A snapshot of the retained output, oldest first."
   (let ((j (find-job job)))
     (sb-thread:with-mutex ((job-buffer-lock j))
-      (coerce (job-output j) 'list))))
+      (ring-list (job-output j)))))
+
+(defun job-output-dropped (job)
+  "How many output objects the ring buffer has dropped (0 unless the job
+overran its buffer capacity)."
+  (let ((j (find-job job)))
+    (sb-thread:with-mutex ((job-buffer-lock j))
+      (ring-buffer-dropped (job-output j)))))
 
 (defun wait-job (job &key timeout)
   "Block until JOB completes, then return (values output-list t).  Under
