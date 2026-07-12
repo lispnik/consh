@@ -61,8 +61,9 @@ spliced in literally."
                  ((char= c #\$)
                   (read-char s)
                   (if (eql (peek-char nil s nil nil) #\()
-                      (push (cons :escape (read s nil nil)) tokens)   ; $(form)
-                      (push (cons :word "$") tokens)))
+                      (push (cons :escape (read s nil nil)) tokens)          ; $(form)
+                      (push (cons :word (concatenate 'string "$" (%read-word s)))
+                            tokens)))                                        ; $VAR / ${VAR}
                  ((member c '(#\" #\')) (push (cons :word (%read-quoted s c)) tokens))
                  (t (push (cons :word (%read-word s)) tokens))))
       (nreverse tokens))))
@@ -88,13 +89,126 @@ spliced in literally."
         stage-tokens)))
 
 ;;; ---------------------------------------------------------------------------
+;;; $VAR / ${VAR} environment expansion
+;;; ---------------------------------------------------------------------------
+
+(defun %var-name-char-p (c &optional firstp)
+  (and c (or (alpha-char-p c) (char= c #\_) (and (not firstp) (digit-char-p c)))))
+
+(defun %var-ref-at (string i)
+  "If STRING has a $-var reference whose name starts at index I (the char just
+after `$`), return (values name index-after-ref), else (values NIL I)."
+  (let ((n (length string)))
+    (cond
+      ((and (< i n) (char= (char string i) #\{))
+       (let ((close (position #\} string :start (1+ i))))
+         (if close (values (subseq string (1+ i) close) (1+ close)) (values nil i))))
+      ((and (< i n) (%var-name-char-p (char string i) t))
+       (let ((end (or (position-if-not #'%var-name-char-p string :start i) n)))
+         (values (subseq string i end) end)))
+      (t (values nil i)))))
+
+(defun %expand-vars (string)
+  "Replace $NAME and ${NAME} in STRING with the environment value (empty if
+unset).  A `$` not starting a valid reference stays literal."
+  (if (find #\$ string)
+      (with-output-to-string (out)
+        (let ((i 0) (n (length string)))
+          (loop while (< i n) do
+            (if (char= (char string i) #\$)
+                (multiple-value-bind (name next) (%var-ref-at string (1+ i))
+                  (if name
+                      (progn (write-string (or (sb-ext:posix-getenv name) "") out)
+                             (setf i next))
+                      (progn (write-char #\$ out) (incf i))))
+                (progn (write-char (char string i) out) (incf i))))))
+      string))
+
+;;; ---------------------------------------------------------------------------
+;;; Globbing (SPEC §1: a function returning pathname objects)
+;;; ---------------------------------------------------------------------------
+
+(defun %match-set (pattern i ch)
+  "PATTERN[I] is `[`.  Match CH against the set, returning (values matched-p
+index-after-])."
+  (let ((j (1+ i)) (n (length pattern)) (negate nil) (matched nil))
+    (when (and (< j n) (member (char pattern j) '(#\! #\^))) (setf negate t) (incf j))
+    (loop while (and (< j n) (char/= (char pattern j) #\])) do
+      (if (and (< (+ j 2) n) (char= (char pattern (1+ j)) #\-)
+               (char/= (char pattern (+ j 2)) #\]))
+          (progn (when (char<= (char pattern j) ch (char pattern (+ j 2)))
+                   (setf matched t))
+                 (incf j 3))
+          (progn (when (char= (char pattern j) ch) (setf matched t))
+                 (incf j))))
+    (values (if negate (not matched) matched) (1+ j))))   ; skip the closing ]
+
+(defun %glob-match-p (pattern name)
+  "True if shell glob PATTERN (`*` any run, `?` one char, `[set]`) matches NAME.
+A leading dot in NAME is not matched by a leading `*`/`?` (Unix convention)."
+  (when (and (plusp (length name)) (char= (char name 0) #\.)
+             (plusp (length pattern)) (not (char= (char pattern 0) #\.)))
+    (return-from %glob-match-p nil))
+  (labels ((m (px sx)
+             (cond
+               ((= px (length pattern)) (= sx (length name)))
+               ((char= (char pattern px) #\*)
+                (or (m (1+ px) sx)
+                    (and (< sx (length name)) (m px (1+ sx)))))
+               ((= sx (length name)) nil)
+               ((char= (char pattern px) #\?) (m (1+ px) (1+ sx)))
+               ((char= (char pattern px) #\[)
+                (multiple-value-bind (ok next) (%match-set pattern px (char name sx))
+                  (and ok (m next (1+ sx)))))
+               ((char= (char pattern px) (char name sx)) (m (1+ px) (1+ sx)))
+               (t nil))))
+    (m 0 0)))
+
+(defun %glob-chars-p (string)
+  (find-if (lambda (c) (member c '(#\* #\? #\[))) string))
+
+(defun %basename (pathname)
+  (if (and (null (pathname-name pathname)) (pathname-directory pathname))
+      (car (last (pathname-directory pathname)))     ; a directory: its name, no /
+      (file-namestring pathname)))
+
+(defun glob (pattern &key (directory *current-directory*))
+  "Return the pathnames under DIRECTORY matching shell PATTERN (`*` `?` `[set]`),
+sorted.  A pattern with a directory part globs its basename in that
+subdirectory.  Resolves against *current-directory*, never the process cwd."
+  (let* ((slash (position #\/ pattern :from-end t))
+         (subdir (if slash (subseq pattern 0 (1+ slash)) ""))
+         (base-pat (if slash (subseq pattern (1+ slash)) pattern))
+         (base (merge-pathnames subdir directory))
+         (entries (ignore-errors
+                   (directory (merge-pathnames (make-pathname :name :wild :type :wild)
+                                               base)))))
+    (sort (loop for p in entries
+                when (%glob-match-p base-pat (%basename p))
+                  collect (merge-pathnames (concatenate 'string subdir (%basename p))
+                                           directory))
+          #'string< :key #'namestring)))
+
+;;; ---------------------------------------------------------------------------
 ;;; Parsing a command line into a Lisp form
 ;;; ---------------------------------------------------------------------------
 
-(defun %token->form (token)
-  (ecase (car token)
-    (:word   (cdr token))        ; a self-evaluating string literal
-    (:escape (cdr token))))      ; a Lisp form, evaluated at runtime
+(defun %expand-word-arg (word)
+  "Expand a bare word into arg strings: $VAR first, then glob.  A glob that
+matches nothing stays literal (bash default)."
+  (let ((expanded (%expand-vars word)))
+    (if (%glob-chars-p expanded)
+        (let ((matches (glob expanded)))
+          (if matches (mapcar #'namestring matches) (list expanded)))
+        (list expanded))))
+
+(defun %expand-stage-args (tokens)
+  "Expand vars + globs across TOKENS into a flat list of argument forms (strings
+and, for escapes, Lisp forms)."
+  (loop for tok in tokens
+        append (ecase (car tok)
+                 (:word (%expand-word-arg (cdr tok)))
+                 (:escape (list (cdr tok))))))
 
 (defun %split-pipe (tokens)
   "Split TOKENS on (:pipe) into a list of per-stage token lists."
@@ -109,15 +223,25 @@ spliced in literally."
 (defun %stage->form (stage-tokens)
   (let ((tokens (%expand-alias stage-tokens)))
     (unless tokens (error 'shell-parse-error :line "empty pipeline stage"))
-    (cons 'external (mapcar #'%token->form tokens))))
+    (cons 'external (%expand-stage-args tokens))))
 
 (defun parse-shell-line (line)
-  "Desugar a command LINE into a Lisp form that runs it.  NIL for a blank line."
+  "Desugar a command LINE into a Lisp form that runs it.  NIL for a blank line.
+A single-stage foreground command whose name is a builtin desugars to a builtin
+call; everything else desugars to a pipeline run."
   (let ((tokens (tokenize line)))
     (when (null tokens) (return-from parse-shell-line nil))
     (let* ((background (eq (caar (last tokens)) :amp))
            (tokens (if background (butlast tokens) tokens))
            (stages (%split-pipe tokens)))
+      ;; single-stage foreground builtin?
+      (when (and (= 1 (length stages)) (not background))
+        (let* ((toks (%expand-alias (first stages)))
+               (head (first toks))
+               (name (and head (eq (car head) :word) (%expand-vars (cdr head)))))
+          (when (and name (builtin-p name))
+            (return-from parse-shell-line
+              (list '%builtin name (cons 'list (%expand-stage-args (rest toks))))))))
       (list '%shell-run
             (cons 'list (mapcar #'%stage->form stages))
             :background background))))
@@ -128,6 +252,89 @@ spliced in literally."
     (if background
         (run-job pipeline :background t)
         (pipeline-collect pipeline))))
+
+;;; ---------------------------------------------------------------------------
+;;; Builtins (SPEC §1: the user environment is the image)
+;;; ---------------------------------------------------------------------------
+
+(define-condition shell-exit (error)
+  ((code :initarg :code :initform 0 :reader shell-exit-code))
+  (:report (lambda (c s) (format s "exit ~D" (shell-exit-code c)))))
+
+(defvar *builtins* (make-hash-table :test 'equal)
+  "Command name -> function of one argument (the list of arg strings).")
+(defvar *previous-directory* nil "The directory `cd -` returns to.")
+
+(defun define-builtin (name fn) (setf (gethash name *builtins*) fn))
+(defun builtin (name) (values (gethash name *builtins*)))
+(defun builtin-p (name) (nth-value 1 (gethash name *builtins*)))
+(defun %builtin (name args) (funcall (builtin name) args))
+
+(defun %ensure-directory-pathname (namestring)
+  (if (and (plusp (length namestring))
+           (char= (char namestring (1- (length namestring))) #\/))
+      namestring
+      (concatenate 'string namestring "/")))
+
+(defun %job-spec->job (spec)
+  "Resolve a job spec (\"%2\", \"2\", or NIL for the most recent) to a job."
+  (if (null spec)
+      (car (last (all-jobs)))
+      (let ((id (parse-integer (string-left-trim "%" spec) :junk-allowed t)))
+        (and id (find-job id)))))
+
+(define-builtin "cd"
+  (lambda (args)
+    (let ((dir (cond ((null args) (namestring (user-homedir-pathname)))
+                     ((and (string= (first args) "-") *previous-directory*)
+                      (namestring *previous-directory*))
+                     (t (first args)))))
+      (let ((new (handler-case
+                     (truename (merge-pathnames (%ensure-directory-pathname dir)
+                                                *current-directory*))
+                   (file-error () (error 'shell-parse-error :line
+                                         (format nil "cd: no such directory: ~A" dir))))))
+        (setf *previous-directory* *current-directory*
+              *current-directory* new)
+        (namestring new)))))
+
+(define-builtin "pwd" (lambda (args) (declare (ignore args))
+                        (namestring *current-directory*)))
+
+(define-builtin "exit"
+  (lambda (args)
+    (error 'shell-exit :code (if args (or (parse-integer (first args) :junk-allowed t) 0) 0))))
+
+(define-builtin "export"
+  (lambda (args)
+    (dolist (a args)
+      (let ((eq (position #\= a)))
+        (when eq (sb-posix:setenv (subseq a 0 eq) (subseq a (1+ eq)) 1))))
+    (values)))
+
+(define-builtin "unset"
+  (lambda (args) (dolist (a args) (ignore-errors (sb-posix:unsetenv a))) (values)))
+
+(define-builtin "alias"
+  (lambda (args)
+    (if args
+        (progn (dolist (a args)
+                 (let ((eq (position #\= a)))
+                   (when eq (define-alias (subseq a 0 eq) (subseq a (1+ eq))))))
+               (values))
+        (loop for k being the hash-keys of *aliases* using (hash-value v)
+              collect (format nil "~A=~A" k v)))))
+
+(define-builtin "unalias"
+  (lambda (args) (dolist (a args) (remove-alias a)) (values)))
+
+(define-builtin "jobs" (lambda (args) (declare (ignore args)) (all-jobs)))
+(define-builtin "fg" (lambda (args) (fg (%job-spec->job (first args)))))
+(define-builtin "bg" (lambda (args) (bg (%job-spec->job (first args)))))
+
+(define-builtin "history"
+  (lambda (args) (declare (ignore args))
+    (loop for i below (history-count) collect (cons i (history-form i)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; History (SPEC §1: a sequence of (form . result), results hold live objects)
@@ -239,6 +446,9 @@ under a directory).  New contexts are new methods."))
     (maphash (lambda (k v) (declare (ignore v))
                (when (%prefixp text k) (push k names)))
              *wrappers*)
+    (maphash (lambda (k v) (declare (ignore v))       ; builtins
+               (when (%prefixp text k) (push k names)))
+             *builtins*)
     (sort (remove-duplicates (append names (ignore-errors (%path-commands text)))
                              :test #'string=)
           #'string<)))
@@ -303,6 +513,7 @@ line; EOF (Ctrl-D) ends the loop."
       (when (null line) (return))
       (unless (zerop (length (string-trim '(#\Space #\Tab) line)))
         (handler-case (%present (shell-eval line) out)
+          (shell-exit (c) (return (shell-exit-code c)))     ; `exit`
           (sb-sys:interactive-interrupt () (format out "~&^C~%"))
           (error (e) (format out "~&Error: ~A~%" e)))))))
 

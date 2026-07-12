@@ -122,6 +122,10 @@
    ;; ---- Phase 6: surface syntax ----
    #:tokenize #:parse-shell-line #:%shell-run #:shell-eval #:shell-repl
    #:shell-parse-error
+   ;; builtins, $VAR expansion, globbing
+   #:*builtins* #:define-builtin #:builtin #:builtin-p #:%builtin
+   #:shell-exit #:shell-exit-code #:*previous-directory*
+   #:%expand-vars #:glob
    #:*aliases* #:define-alias #:remove-alias
    #:*history* #:record-history #:history-count #:history-ref #:history-form
    #:history-result #:last-result #:clear-history

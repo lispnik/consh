@@ -247,6 +247,8 @@ surface just desugars to the pipeline/job forms above.
 ```lisp
 (shell-eval "echo hello")                    => ("hello")
 (shell-eval "seq 1 5 | grep 3")              => ("3")
+(shell-eval "echo $HOME/notes")              => ("/home/you/notes")  ; $VAR expands
+(shell-eval "cat *.txt")                     ; globs to matching pathnames
 (shell-eval "echo $(string-upcase \"hi\")")  => ("HI")     ; $() escapes to Lisp
 (shell-eval "(+ 40 2)")                      => 42         ; ( ... ) is Lisp
 
@@ -255,9 +257,11 @@ surface just desugars to the pipeline/job forms above.
 => (%SHELL-RUN (LIST (EXTERNAL "find" "/") (EXTERNAL "grep" "foo")) :BACKGROUND T)
 ```
 
-The user environment is the image: aliases (`define-alias "ll" "ls -l"`), the
-prompt (`*prompt-function*`), history of `(form . result)` pairs whose results
-hold the live objects, and completion as a generic function:
+Builtins run in the image: `cd` (sets `*current-directory*`, never `chdir(2)`),
+`pwd`, `export`/`unset`, `alias`/`unalias`, `jobs`/`fg`/`bg`, `history`, `exit`.
+The user environment is the image: aliases, the prompt (`*prompt-function*`),
+history of `(form . result)` pairs whose results hold the live objects, and
+completion as a generic function:
 
 ```lisp
 (complete :symbol "map" :package :cl)  => ("map" "map-into" "mapc" "mapcan" "mapcar" ...)

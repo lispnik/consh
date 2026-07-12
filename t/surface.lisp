@@ -180,3 +180,131 @@
     (with-open-file (s (merge-pathnames "zzfile" dir) :direction :output) (write-string "x" s))
     (let ((*current-directory* dir))
       (is (member "zzfile" (complete-line "cat zz") :test #'string=)))))
+
+;;; ===========================================================================
+;;; $VAR / ${VAR} environment expansion
+;;; ===========================================================================
+
+(test expand-vars-basic
+  (sb-posix:setenv "CONSH_TV" "world" 1)
+  (unwind-protect
+       (progn
+         (is (string= "hi-world" (%expand-vars "hi-$CONSH_TV")))
+         (is (string= "[world]" (%expand-vars "[${CONSH_TV}]")))
+         (is (string= "world/x" (%expand-vars "$CONSH_TV/x")))
+         (is (string= "" (%expand-vars "$CONSH_UNSET_ZZ")))       ; unset -> empty
+         (is (string= "$ 5" (%expand-vars "$ 5"))))               ; bare $ literal
+    (sb-posix:unsetenv "CONSH_TV")))
+
+(test expand-vars-in-command
+  (sb-posix:setenv "CONSH_TV" "there" 1)
+  (unwind-protect
+       (is (equal '("hi there") (shell-eval "echo hi $CONSH_TV")))
+    (sb-posix:unsetenv "CONSH_TV")))
+
+;;; ===========================================================================
+;;; Globbing
+;;; ===========================================================================
+
+(test glob-matches-star-question-set
+  (let ((dir (make-temp-dir)))
+    (dolist (n '("a.txt" "b.txt" "c.log" "a1" "a2" "ab"))
+      (with-open-file (s (merge-pathnames n dir) :direction :output) (write-string "x" s)))
+    (is (equal '("a.txt" "b.txt")
+               (mapcar #'file-namestring (glob "*.txt" :directory dir))))
+    (is (equal '("a1" "a2" "ab")                                ; ? = exactly one char
+               (mapcar #'file-namestring (glob "a?" :directory dir))))
+    (is (equal '("a1" "a2")                                     ; [set]
+               (mapcar #'file-namestring (glob "a[12]" :directory dir))))))
+
+(test glob-in-a-command-expands-to-args
+  (let ((dir (make-temp-dir)))
+    (dolist (n '("one.txt" "two.txt" "skip.md"))
+      (with-open-file (s (merge-pathnames n dir) :direction :output) (write-string "x" s)))
+    (let ((*current-directory* dir))
+      ;; cat *.txt -> the two files concatenated (each holds "x", no newline)
+      (is (equal '("xx") (shell-eval "cat *.txt"))))))
+
+(test glob-no-match-stays-literal
+  (let ((dir (make-temp-dir)))
+    (let ((*current-directory* dir))
+      (is (equal '("nope-*.zzz") (shell-eval "echo nope-*.zzz"))))))
+
+(test glob-subdirectory-pattern
+  (let ((dir (make-temp-dir)))
+    (ensure-directories-exist (merge-pathnames "sub/" dir))
+    (with-open-file (s (merge-pathnames "sub/x.txt" dir) :direction :output) (write-string "x" s))
+    (is (equal '("x.txt")
+               (mapcar #'file-namestring (glob "sub/*.txt" :directory dir))))))
+
+;;; ===========================================================================
+;;; Builtins
+;;; ===========================================================================
+
+(test builtin-p-recognizes-builtins
+  (is-true (builtin-p "cd"))
+  (is-true (builtin-p "pwd"))
+  (is-false (builtin-p "ls")))                                 ; a wrapper, not a builtin
+
+(test cd-changes-current-directory-not-process-cwd
+  (let ((dir (make-temp-dir))
+        (*current-directory* #P"/private/tmp/")
+        (*previous-directory* nil)
+        (cwd-before (sb-posix:getcwd)))
+    (shell-eval (format nil "cd ~A" (namestring dir)))
+    (is (equal (truename dir) *current-directory*))
+    (is (equal cwd-before (sb-posix:getcwd)))                  ; process cwd untouched
+    ;; cd - returns to the previous directory
+    (shell-eval "cd -")
+    (is (equal (truename #P"/private/tmp/") *current-directory*))))
+
+(test cd-to-missing-directory-errors
+  (let ((*current-directory* #P"/private/tmp/"))
+    (signals shell-parse-error (shell-eval "cd /consh-no-such-dir-xyz"))))
+
+(test pwd-builtin
+  (let ((*current-directory* #P"/private/tmp/"))
+    (is (string= "/private/tmp/" (shell-eval "pwd")))))
+
+(test export-and-unset
+  (unwind-protect
+       (progn
+         (shell-eval "export CONSH_EXP=99")
+         (is (string= "99" (sb-ext:posix-getenv "CONSH_EXP")))
+         (shell-eval "unset CONSH_EXP")
+         (is (null (sb-ext:posix-getenv "CONSH_EXP"))))
+    (sb-posix:unsetenv "CONSH_EXP")))
+
+(test alias-builtin-defines-and-lists
+  (unwind-protect
+       (progn
+         (shell-eval "alias cg=grep")
+         (is (equal '(%shell-run (list (external "grep" "x")) :background nil)
+                    (parse-shell-line "cg x")))
+         (is (member "cg=grep" (shell-eval "alias") :test #'string=)))
+    (remove-alias "cg")))
+
+(test exit-builtin-signals-shell-exit
+  (is (= 5 (handler-case (progn (shell-eval "exit 5") -1)
+             (shell-exit (c) (shell-exit-code c))))))
+
+(test jobs-and-fg-builtins
+  (let ((job (run-job (make-pipeline (list (external "sh" "-c" "printf 'z\\n'"))) :background t)))
+    (is (member job (shell-eval "jobs")))
+    (is (equal '("z") (shell-eval (format nil "fg %~D" (job-id job)))))))
+
+(test builtins-only-dispatch-single-stage-foreground
+  ;; `cd` inside a pipeline is NOT a builtin — it desugars to an external stage
+  (is (equal '(%shell-run (list (external "cd" "x") (external "cat")) :background nil)
+             (parse-shell-line "cd x | cat"))))
+
+(test history-builtin-lists-past-forms
+  (clear-history)
+  (shell-eval "(+ 1 1)")
+  (let ((h (shell-eval "history")))
+    (is (consp h))
+    (is (equal '(+ 1 1) (cdr (first h))))))
+
+(test command-completion-includes-builtins
+  (is (member "cd" (complete :command "c") :test #'string=))
+  (is (member "pwd" (complete :command "pw") :test #'string=)))
