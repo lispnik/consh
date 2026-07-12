@@ -16,10 +16,14 @@
   (unwind-protect (&body)
     (stop-reaper)))
 
+(defvar *temp-dir-counter* 0
+  "Monotonic counter guaranteeing unique temp-dir names within one image (a
+timestamp is not fine-grained enough on fast CI machines).")
+
 (defun make-temp-dir ()
-  "Create and return a fresh temporary directory pathname."
+  "Create and return a fresh, unique temporary directory pathname."
   (let ((path (format nil "/tmp/consh-test-~D-~D/"
-                      (sb-posix:getpid) (get-internal-real-time))))
+                      (sb-posix:getpid) (incf *temp-dir-counter*))))
     (ensure-directories-exist path)
     (truename path)))
 
