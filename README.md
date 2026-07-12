@@ -1,0 +1,242 @@
+# consh
+
+A Unix shell implemented as a Common Lisp image — **pipelines carry CLOS
+objects, not bytes.**
+
+Text exists only at the boundary with external processes and the terminal.
+Inside the image, `ls` yields file *objects*, a pipeline stage is a Lisp
+function, a command failure is a *condition* with restarts, and a job is a live
+object combining subprocesses and Lisp threads. It is deliberately **not**
+POSIX-compliant: there is no string `eval`, no word-splitting layer — arguments
+are Lisp values and globbing returns pathnames.
+
+Built on SBCL in the phase order of [`SPEC.md`](SPEC.md), each phase ending with
+its FiveAM suite green (**908 checks**).
+
+```
+                 bytes                         objects
+   ┌────────┐  kernel pipe  ┌────────┐  parse  ┌───────────┐  Lisp fn  ┌─────────┐
+   │  find  │ ────────────▶ │  grep  │ ──────▶ │ file-info │ ────────▶ │ :filter │ ─▶ results
+   └────────┘               └────────┘         └───────────┘           └─────────┘
+        └──────── one pgid, killpg to abort ────────┘        └── fused, one thread ──┘
+```
+
+
+## Requirements
+
+- **SBCL** (developed on 2.6.5; macOS arm64 and Linux)
+- **[ocicl](https://github.com/ocicl/ocicl)** for dependencies (`cffi`, `fiveam`)
+
+```sh
+ocicl install          # restores deps pinned in ocicl.csv into ./ocicl/
+```
+
+Then, from a REPL with the project + `./ocicl/` on your ASDF source registry:
+
+```lisp
+(asdf:load-system :consh)
+(in-package :consh)
+```
+
+Everything below runs at that REPL. `=>` shows the real returned value.
+
+
+## The idea: objects, not bytes
+
+A parser protocol turns each command's output into objects at the boundary.
+`ls` prints only names, so its wrapper parses the names and then `stat()`s each
+in-process to return enriched file objects — the on-ramp to replacing external
+tools with native ones without changing call sites:
+
+```lisp
+;; ls ENRICHES bare names into file objects (size / mtime / owner via stat)
+(let ((inv (make-instance 'ls-invocation :directory #P"/tmp/consh-demo/")))
+  (seq-collect (parse-output inv (make-string-input-stream
+                                  (format nil "readme.txt~%data.bin~%")))))
+=> (#<FILE-INFO readme.txt 5 bytes mkennedy>
+    #<FILE-INFO data.bin 10 bytes mkennedy>)
+
+;; an unregistered command falls back to lines of text
+(seq-collect (parse-output (make-invocation "wc")
+                           (make-string-input-stream (format nil "line one~%line two~%"))))
+=> ("line one" "line two")
+```
+
+Adding a wrapper is just `defmethod`s — no change to the shell core.
+
+
+## Pipelines
+
+`pipe` builds a pipeline **object** (data, not execution). The compiler groups
+adjacent stages so the plumbing matches bash where it should, and goes beyond it
+where objects help.
+
+```lisp
+;; external | external is ONE real pipe(2) — bytes go kernel-to-kernel,
+;; never through Lisp. Identical cost to bash.
+(pipeline-collect
+ (make-pipeline (list (external "sh" "-c" "printf 'foo\\nbar\\nfoobar\\n'")
+                      (external "grep" "foo"))))
+=> ("foo" "foobar")
+
+;; external -> an in-image Lisp stage (map / filter / mapcat), run in a thread
+(pipeline-collect
+ (make-pipeline (list (external "sh" "-c" "printf 'a\\nb\\nc\\n'")
+                      (map-stage #'string-upcase))))
+=> ("A" "B" "C")
+
+;; CLOS objects cross the boundary, not text: ls | keep files bigger than 5 bytes
+(pipeline-collect
+ (make-pipeline (list (external (make-invocation "ls" "/tmp/consh-demo"))
+                      (filter-stage (lambda (f) (> (file-size f) 5))))))
+=> file-info objects for data.bin (10) and logs/ (64)
+```
+
+Output is **lazy**. Taking a prefix cancels the producer — and kills the
+external process (SIGPIPE + `killpg`), leaving no zombies:
+
+```lisp
+;; take 5 from an infinite `yes`, then it's gone
+(take 5 (make-pipeline (list (external "yes"))))
+=> ("y" "y" "y" "y" "y")
+```
+
+`describe` prints the compiled plan — which stages are processes, where the
+kernel pipes and parse/unparse boundaries fall, which Lisp stages fused:
+
+```lisp
+(describe (pipe (find "/") (grep "foo") (:map #'identity)))
+Pipeline of 3 stages:
+  [external] find -> grep  (kernel-pipe)
+      == parse boundary ==
+  [lisp] map
+  head: stdin   tail: channel
+```
+
+Failures are typed conditions, not exit codes. Under `:on-failure :signal` a
+failing stage raises a `pipeline-failed` naming the stage and carrying its
+parsed stderr; the `restart-stage` restart reruns a corrected pipeline. Wrappers
+translate exit codes: `grep` exiting 1 ("no match") is *not* an error.
+
+
+## Processes & object channels
+
+The lower layers are usable on their own. Processes are inspectable, signalable
+objects reaped by a single `waitpid` thread:
+
+```lisp
+(let ((p (launch "true")))  (wait-process p)
+  (list (process-status p) (process-exit-code p)))
+=> (:EXITED 0)
+```
+
+Channels are bounded, thread-safe object queues with backpressure and EOF —
+the object-level analogue of a kernel pipe:
+
+```lisp
+(let ((ch (make-channel :capacity 4)) (obj (list :a :b)))
+  (channel-put ch obj) (close-channel ch)
+  (list (eq obj (channel-take ch))     ; same object back — identity preserved
+        (eof-p (channel-take ch))))    ; then EOF
+=> (T T)
+```
+
+
+## Jobs & interactive conditions
+
+A job = a subprocess set (one pgid) + a Lisp thread set + channels. `bg`/`fg`,
+and `C-z` (`stop-job`) work over *both* the processes (SIGTSTP) and the Lisp
+workers (parked at their next channel op via a shared stop-flag):
+
+```lisp
+;; background a pipeline, then foreground it — output intact
+(fg (run-job (make-pipeline (list (external "sh" "-c" "printf 'a\\nb\\nc\\n'")))
+             :background t))
+=> ("a" "b" "c")
+```
+
+The headline: an **unhandled condition in a worker parks the job instead of
+crashing it**, with the stack — and therefore all restarts — intact. You inspect
+it at the prompt and `debug-job` resumes the frozen line end-to-end, running the
+restart in the worker's own context (the shell analogue of stopping on SIGTTIN):
+
+```lisp
+;; a parse worker hit a malformed record 'OOPS'; the whole line froze:
+job-state:     :PARKED
+job-events:    "job 1 parked: PARSE-ERROR in parse stage"
+job-restarts:  (USE-RAW-LINES TRY-DIALECT DEFINE-PARSER ABORT)
+
+;; attach and pick a restart — the pipeline resumes and completes:
+(debug-job job :restart 'use-raw-lines)
+(fg job)
+=> (("a" . "1") "OOPS" ("c" . "3"))
+```
+
+
+## Surface syntax
+
+A bare line reads as a command; a line starting with `(` is full Lisp; `,` and
+`$(...)` escape to Lisp inside a command; `|` builds a pipeline and `&`
+backgrounds it. Interactive and scripted use are one language because the
+surface just desugars to the pipeline/job forms above.
+
+```lisp
+(shell-eval "echo hello")                    => ("hello")
+(shell-eval "seq 1 5 | grep 3")              => ("3")
+(shell-eval "echo $(string-upcase \"hi\")")  => ("HI")     ; $() escapes to Lisp
+(shell-eval "(+ 40 2)")                      => 42         ; ( ... ) is Lisp
+
+;; the desugaring is just s-expressions:
+(parse-shell-line "find / | grep foo &")
+=> (%SHELL-RUN (LIST (EXTERNAL "find" "/") (EXTERNAL "grep" "foo")) :BACKGROUND T)
+```
+
+The user environment is the image: aliases (`define-alias "ll" "ls -l"`), the
+prompt (`*prompt-function*`), history of `(form . result)` pairs whose results
+hold the live objects, and completion as a generic function:
+
+```lisp
+(complete :symbol "map" :package :cl)  => ("map" "map-into" "mapc" "mapcan" "mapcar" ...)
+(complete :command "gr")               ; registered wrappers + $PATH executables
+(complete :path "re" :directory d)     ; filesystem entries
+```
+
+
+## How it's built
+
+| File | Phase | What it does |
+|---|---|---|
+| `src/ffi.lisp` | 1 | CFFI: `pipe`, `posix_spawn` (+ file actions incl. per-child `chdir`), `waitpid`, `kill`/`killpg`, `stat`, `getpwuid` |
+| `src/reaper.lisp` | 1 | Process objects; the single `waitpid` reaper thread; `*current-directory*` (no process-wide `chdir`, ever) |
+| `src/channel.lisp` | 2 | Bounded object channels: backpressure, EOF, downstream cancellation, stop-flag parking |
+| `src/invocation.lisp`, `parse.lisp`, `wrappers/` | 3 | Per-command parser protocol; lazy channel-backed object sequences; `parse-error` restarts; `ls`/`find`/`cat`/`grep` |
+| `src/pipeline.lisp`, `exec.lisp` | 4 | `pipe` macro, plumbing/fusion compiler, pump threads, stderr drainers, `pipeline-result`, cancellation |
+| `src/jobs.lisp` | 5 | Job objects, fg/bg, C-z, job events, `debug-job` cross-thread conditions |
+| `src/surface.lisp` | 6 | Reader sugar, prompt function, history, completion, aliases |
+
+Thread discipline (SPEC §5): one reaper for the image; one pump thread per
+parse/unparse boundary; one stderr drainer per external; one worker per unfused
+Lisp stage. Cancellation flows through objects (closed channels, EOF) and
+`killpg` — never `terminate-thread`. Every pipe end is close-on-exec and the
+parent closes its child-side copies immediately. `stat`/`fcntl` go through
+`sb-posix` for ABI correctness (a naive CFFI `fcntl` corrupts args on Darwin
+arm64).
+
+
+## Testing
+
+```sh
+sbcl --non-interactive --eval '(asdf:test-system :consh)'
+```
+
+908 FiveAM checks across suites mirroring `src/` — including the SPEC acceptance
+tests for every phase (100 concurrent `sleep`s all reaped; `external→external`
+uses exactly one kernel pipe; `yes | head` doesn't hang; a failing middle stage
+names itself; a stderr flood doesn't deadlock; C-z freezes and resumes intact;
+`debug-job` resumes a parked line). Integration tests depend only on coreutils.
+
+
+## Non-goals
+
+POSIX `sh` compatibility, `set -e`/pipefail emulation, string-based `eval`, and
+portability beyond SBCL. See [`SPEC.md`](SPEC.md) for the full design.
