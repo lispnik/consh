@@ -1,0 +1,36 @@
+#!/usr/bin/expect -f
+#
+# Drives an interactive consh session with typed-looking input, for recording
+# the README demo.  Usage: expect demo.exp /path/to/consh   (run from a dir with
+# a few files so `ls` has something to enrich, e.g. /tmp/consh-demo).
+#
+# demo.gif was produced with:
+#   asciinema rec --headless -c "expect assets/demo.exp $PWD/consh" \
+#     --idle-time-limit 1.5 --overwrite demo.cast
+#   grep -v '"spawn ' demo.cast | sed 's/"rows":24/"rows":18/' > assets/demo.cast
+#   agg --theme dracula --font-size 20 --speed 1.15 --last-frame-duration 3 \
+#     assets/demo.cast assets/demo.gif
+#
+set timeout 25
+set send_slow {1 .045}
+set consh [lindex $argv 0]
+
+proc run {cmd} {
+    expect "> "
+    sleep 0.6
+    send -s -- "$cmd"
+    sleep 0.45
+    send -- "\r"
+}
+
+spawn $consh
+expect "Ctrl-D to exit."
+run {echo hello from consh}
+run {seq 1 5 | grep 3}
+run {ls}
+run {echo $(string-upcase "objects, not bytes")}
+run {(loop for i below 4 collect (* i i))}
+expect "> "
+sleep 1.2
+send -- "\x04"
+expect eof

@@ -5,6 +5,11 @@
 A Unix shell implemented as a Common Lisp image — **pipelines carry CLOS
 objects, not bytes.**
 
+<p align="center">
+  <img src="assets/demo.gif" width="800"
+       alt="A consh session: a command, a pipeline, `ls` yielding file-info objects, a $()-escape to Lisp, and a bare Lisp form — all at one prompt.">
+</p>
+
 Text exists only at the boundary with external processes and the terminal.
 Inside the image, `ls` yields file *objects*, a pipeline stage is a Lisp
 function, a command failure is a *condition* with restarts, and a job is a live
