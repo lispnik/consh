@@ -238,6 +238,28 @@ names itself; a stderr flood doesn't deadlock; C-z freezes and resumes intact;
 `debug-job` resumes a parked line). Integration tests depend only on coreutils.
 
 
+## Building a standalone executable
+
+The `consh` system is wired for ASDF's `program-op`, so it dumps a self-contained
+image with a REPL entry point:
+
+```sh
+sbcl --non-interactive --eval '(asdf:make :consh)'   # -> ./consh
+```
+
+```console
+$ printf 'echo hello from the image\nseq 1 3 | grep 2\n(+ 40 2)\n' | ./consh
+consh — a Common Lisp Unix shell (objects, not bytes). Ctrl-D to exit.
+consh …/consh/> hello from the image
+consh …/consh/> 2
+consh …/consh/> 42
+```
+
+(The FFI re-resolves its cached libc symbol pointers on image startup via
+`sb-ext:*init-hooks*`, so the dumped executable spawns processes correctly
+despite ASLR.)
+
+
 ## Non-goals
 
 POSIX `sh` compatibility, `set -e`/pipefail emulation, string-based `eval`, and

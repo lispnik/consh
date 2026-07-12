@@ -122,4 +122,5 @@
    #:*history* #:record-history #:history-count #:history-ref #:history-form
    #:history-result #:last-result #:clear-history
    #:*prompt-function* #:default-prompt #:prompt
-   #:complete #:complete-line))
+   #:complete #:complete-line
+   #:main))

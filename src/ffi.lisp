@@ -49,9 +49,12 @@
 ;;; through it.  Read immediately after the failing call, before any other
 ;;; foreign call can clobber it.
 
-(defparameter *errno-location-fn*
-  (or (cffi:foreign-symbol-pointer "__error")            ; macOS / BSD
-      (cffi:foreign-symbol-pointer "__errno_location"))  ; glibc
+;;; Foreign-symbol pointers are re-resolved at image startup: a pointer cached at
+;;; load time is stale after save-lisp-and-die (ASLR moves libc), so a dumped
+;;; consh executable must recompute them on restore.  See %resolve-ffi-symbols
+;;; and the *init-hooks* registration at the end of this file.
+
+(defvar *errno-location-fn* nil
   "Pointer to the C function returning &errno for the calling thread.")
 
 (defun get-errno ()
@@ -235,12 +238,10 @@ number.  Encoding is the classic wait(2) layout shared by Linux and macOS."
 (defconstant +posix-spawn-setpgroup+ #x02
   "POSIX_SPAWN_SETPGROUP — same value on Linux and macOS.")
 
-(defparameter *addchdir-fn*
-  (or (cffi:foreign-symbol-pointer "posix_spawn_file_actions_addchdir_np")   ; glibc>=2.29, macOS>=10.15
-      (cffi:foreign-symbol-pointer "posix_spawn_file_actions_addchdir"))
+(defvar *addchdir-fn* nil
   "Pointer to the available addchdir file-action, or NIL if the libc predates
 it.  We keep the pointer (not the name) because it is called through
-foreign-funcall-pointer at a computed address.")
+foreign-funcall-pointer at a computed address.  Re-resolved on image startup.")
 
 (defun posix-spawn-available-addchdir-p ()
   "True if this libc can perform a per-spawn chdir file action (glibc >= 2.29,
@@ -248,8 +249,25 @@ macOS >= 10.15).  consh relies on this to honor *current-directory* without a
 process-wide chdir."
   (and *addchdir-fn* t))
 
-;;; environ, for env inheritance.
-(defparameter *environ-symbol* (cffi:foreign-symbol-pointer "environ"))
+;;; environ, for env inheritance.  Re-resolved on image startup.
+(defvar *environ-symbol* nil)
+
+(defun %resolve-ffi-symbols ()
+  "Resolve (or re-resolve) the cached foreign-symbol pointers.  Run at load time
+and again on image restore so a dumped consh executable does not dereference
+addresses left over from the build-time process."
+  (setf *errno-location-fn*
+        (or (cffi:foreign-symbol-pointer "__error")            ; macOS / BSD
+            (cffi:foreign-symbol-pointer "__errno_location"))  ; glibc
+        *addchdir-fn*
+        (or (cffi:foreign-symbol-pointer "posix_spawn_file_actions_addchdir_np")
+            (cffi:foreign-symbol-pointer "posix_spawn_file_actions_addchdir"))
+        *environ-symbol*
+        (cffi:foreign-symbol-pointer "environ"))
+  (values))
+
+(%resolve-ffi-symbols)                                   ; at load
+(pushnew '%resolve-ffi-symbols sb-ext:*init-hooks*)      ; and on image startup
 
 (defun current-environ-pointer ()
   "The live char** environ of this process, for passing straight through to

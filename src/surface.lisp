@@ -291,7 +291,8 @@ command, a `,`/`(`-led token is a symbol, otherwise a path."
 
 (defun shell-repl (&key (in *standard-input*) (out *standard-output*))
   "Read-eval-print loop over surface syntax.  Reports pending job events before
-each prompt and presents results via print-object."
+each prompt and presents results via print-object.  Ctrl-C aborts the current
+line; EOF (Ctrl-D) ends the loop."
   (loop
     (dolist (event (take-job-events)) (format out "~&[~A]~%" event))
     (write-string (prompt) out)
@@ -300,4 +301,14 @@ each prompt and presents results via print-object."
       (when (null line) (return))
       (unless (zerop (length (string-trim '(#\Space #\Tab) line)))
         (handler-case (%present (shell-eval line) out)
+          (sb-sys:interactive-interrupt () (format out "~&^C~%"))
           (error (e) (format out "~&Error: ~A~%" e)))))))
+
+(defun main ()
+  "Entry point for a dumped consh executable: greet, run the REPL, exit cleanly."
+  (format t "consh — a Common Lisp Unix shell (objects, not bytes). Ctrl-D to exit.~%")
+  (finish-output)
+  (handler-case (shell-repl)
+    (sb-sys:interactive-interrupt () (terpri)))
+  (finish-output)
+  (sb-ext:exit :code 0))

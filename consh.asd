@@ -6,6 +6,10 @@
   :license "MIT"
   :depends-on ("cffi")
   :serial t
+  ;; `asdf:make :consh` dumps a standalone executable via program-op.
+  :build-operation "program-op"
+  :build-pathname "../consh"          ; drop the binary at the project root
+  :entry-point "consh:main"
   :pathname "src"
   :components ((:file "packages")
                (:file "ffi")

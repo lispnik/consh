@@ -1,6 +1,10 @@
 # Fetched ocicl dependency sources (ocicl.csv pins versions; ocicl install restores)
 /ocicl/
 
+# Dumped executable image (asdf:make :consh)
+/consh
+/src/consh
+
 # Compiled Lisp
 *.fasl
 *.fasl-tmp
