@@ -1,0 +1,17 @@
+# Fetched ocicl dependency sources (ocicl.csv pins versions; ocicl install restores)
+/ocicl/
+
+# Compiled Lisp
+*.fasl
+*.fasl-tmp
+*.dfsl
+*.lx64fsl
+
+# ASDF / build output
+.cache/
+
+# macOS
+.DS_Store
+
+# Editor / local tooling
+/.claude/settings.local.json
