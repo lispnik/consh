@@ -12,12 +12,17 @@ concurrency:
 
 jobs:
   test:
-    name: Tests (SBCL / Ubuntu)
-    runs-on: ubuntu-latest
+    name: Tests (SBCL / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install SBCL and ocicl
+      - name: Install SBCL and ocicl (Linux)
+        if: runner.os == 'Linux'
         run: |
           # ocicl ships a signed apt repo for x86_64 Debian/Ubuntu.
           sudo apt-get update
@@ -28,6 +33,14 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/ocicl.list
           sudo apt-get update
           sudo apt-get install -y ocicl
+          ocicl setup
+          sbcl --version
+          ocicl version
+
+      - name: Install SBCL and ocicl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install sbcl ocicl
           ocicl setup
           sbcl --version
           ocicl version
