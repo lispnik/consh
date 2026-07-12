@@ -247,24 +247,26 @@
   (is-false (builtin-p "ls")))                                 ; a wrapper, not a builtin
 
 (test cd-changes-current-directory-not-process-cwd
-  (let ((dir (make-temp-dir))
-        (*current-directory* #P"/private/tmp/")
-        (*previous-directory* nil)
-        (cwd-before (sb-posix:getcwd)))
-    (shell-eval (format nil "cd ~A" (namestring dir)))
-    (is (equal (truename dir) *current-directory*))
+  (let* ((start (make-temp-dir))
+         (target (make-temp-dir))
+         (*current-directory* start)
+         (*previous-directory* nil)
+         (cwd-before (sb-posix:getcwd)))
+    (shell-eval (format nil "cd ~A" (namestring target)))
+    (is (equal (truename target) *current-directory*))
     (is (equal cwd-before (sb-posix:getcwd)))                  ; process cwd untouched
     ;; cd - returns to the previous directory
     (shell-eval "cd -")
-    (is (equal (truename #P"/private/tmp/") *current-directory*))))
+    (is (equal (truename start) *current-directory*))))
 
 (test cd-to-missing-directory-errors
-  (let ((*current-directory* #P"/private/tmp/"))
-    (signals shell-parse-error (shell-eval "cd /consh-no-such-dir-xyz"))))
+  (let ((*current-directory* (make-temp-dir)))
+    (signals shell-parse-error (shell-eval "cd consh-no-such-subdir-xyz"))))
 
 (test pwd-builtin
-  (let ((*current-directory* #P"/private/tmp/"))
-    (is (string= "/private/tmp/" (shell-eval "pwd")))))
+  (let ((dir (make-temp-dir)))
+    (let ((*current-directory* dir))
+      (is (string= (namestring dir) (shell-eval "pwd"))))))
 
 (test export-and-unset
   (unwind-protect
