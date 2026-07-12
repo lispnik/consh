@@ -33,22 +33,44 @@
           until (or (null c) (char= c quote))
           do (write-char c out))))
 
+(defparameter +word-delimiters+ '(#\Space #\Tab #\Newline #\| #\& #\< #\>))
+
 (defun %read-word (stream)
-  "Read a bare word up to whitespace or a | / & separator.  Embedded quotes are
+  "Read a bare word up to a delimiter (whitespace, | & < >).  Embedded quotes are
 spliced in literally."
   (with-output-to-string (out)
     (loop for c = (peek-char nil stream nil nil)
-          until (or (null c) (member c '(#\Space #\Tab #\Newline #\| #\&)))
+          until (or (null c) (member c +word-delimiters+))
           do (if (member c '(#\" #\'))
                  (write-string (%read-quoted stream c) out)
                  (write-char (read-char stream) out)))))
 
+(defun %fd-redirect-follows-p (stream)
+  "STREAM is positioned at a digit; true iff the char right after it is < or >
+\(so `2>` is a redirect but `2 >` / `2foo` is not).  Leaves the stream unmoved."
+  (let ((d (read-char stream)))
+    (prog1 (member (peek-char nil stream nil nil) '(#\< #\>))
+      (unread-char d stream))))
+
+(defun %read-redirect (stream fd)
+  "At a `<` or `>` (FD is the explicit fd char or NIL), read the operator and
+push the right redirection token kind.  Returns the token."
+  (let ((c (read-char stream)))               ; consume < or >
+    (if (char= c #\<)
+        '(:redir . :in)
+        (if (eql (peek-char nil stream nil nil) #\>)
+            (progn (read-char stream)
+                   (cons :redir (if (eql fd #\2) :err-append :out-append)))
+            (cons :redir (if (eql fd #\2) :err :out))))))
+
 (defun tokenize (line)
   "Tokenize LINE into a list of tokens, each one of:
-  (:word . string)   a literal word (quotes stripped),
-  (:escape . form)   a Lisp form from `,form` or `$(form)`,
-  (:pipe)            a | separator,
-  (:amp)             a trailing & (background)."
+  (:word . string)     a literal word (quotes stripped),
+  (:escape . form)     a Lisp form from `,form` or `$(form)`,
+  (:pipe)              a | separator,
+  (:amp)               a trailing & (background),
+  (:redir . KIND)      a redirection operator (:in :out :out-append :err
+                       :err-append); the next :word token is its target."
   (with-input-from-string (s line)
     (let ((tokens '()))
       (loop for c = (peek-char nil s nil nil)
@@ -57,6 +79,7 @@ spliced in literally."
                  ((member c '(#\Space #\Tab #\Newline)) (read-char s))
                  ((char= c #\|) (read-char s) (push '(:pipe) tokens))
                  ((char= c #\&) (read-char s) (push '(:amp) tokens))
+                 ((or (char= c #\<) (char= c #\>)) (push (%read-redirect s nil) tokens))
                  ((char= c #\,) (read-char s) (push (cons :escape (read s nil nil)) tokens))
                  ((char= c #\$)
                   (read-char s)
@@ -65,6 +88,9 @@ spliced in literally."
                       (push (cons :word (concatenate 'string "$" (%read-word s)))
                             tokens)))                                        ; $VAR / ${VAR}
                  ((member c '(#\" #\')) (push (cons :word (%read-quoted s c)) tokens))
+                 ;; N>  /  N>>  — a digit fd immediately before a redirect
+                 ((and (member c '(#\1 #\2)) (%fd-redirect-follows-p s))
+                  (let ((fd (read-char s))) (push (%read-redirect s fd) tokens)))
                  (t (push (cons :word (%read-word s)) tokens))))
       (nreverse tokens))))
 
@@ -210,6 +236,20 @@ and, for escapes, Lisp forms)."
                  (:word (%expand-word-arg (cdr tok)))
                  (:escape (list (cdr tok))))))
 
+(defun %split-redirects (tokens)
+  "Return (values argument-tokens redirections-alist).  Each (:redir . KIND)
+token consumes the following :word as its (var-expanded) target."
+  (let ((args '()) (redirs '()) (rest tokens))
+    (loop while rest do
+      (let ((tok (pop rest)))
+        (if (eq (car tok) :redir)
+            (let ((target (pop rest)))
+              (unless (and target (eq (car target) :word))
+                (error 'shell-parse-error :line "redirection is missing a target"))
+              (push (cons (cdr tok) (%expand-vars (cdr target))) redirs))
+            (push tok args))))
+    (values (nreverse args) (nreverse redirs))))
+
 (defun %split-pipe (tokens)
   "Split TOKENS on (:pipe) into a list of per-stage token lists."
   (let ((stages '()) (current '()))
@@ -223,7 +263,11 @@ and, for escapes, Lisp forms)."
 (defun %stage->form (stage-tokens)
   (let ((tokens (%expand-alias stage-tokens)))
     (unless tokens (error 'shell-parse-error :line "empty pipeline stage"))
-    (cons 'external (%expand-stage-args tokens))))
+    (multiple-value-bind (arg-tokens redirs) (%split-redirects tokens)
+      (let ((args (%expand-stage-args arg-tokens)))
+        (if redirs
+            `(external ,@args :redirections ',redirs)
+            (cons 'external args))))))
 
 (defun parse-shell-line (line)
   "Desugar a command LINE into a Lisp form that runs it.  NIL for a blank line.
@@ -240,8 +284,10 @@ call; everything else desugars to a pipeline run."
                (head (first toks))
                (name (and head (eq (car head) :word) (%expand-vars (cdr head)))))
           (when (and name (builtin-p name))
-            (return-from parse-shell-line
-              (list '%builtin name (cons 'list (%expand-stage-args (rest toks))))))))
+            (multiple-value-bind (arg-toks redirs) (%split-redirects (rest toks))
+              (declare (ignore redirs))          ; builtins ignore redirections
+              (return-from parse-shell-line
+                (list '%builtin name (cons 'list (%expand-stage-args arg-toks))))))))
       (list '%shell-run
             (cons 'list (mapcar #'%stage->form stages))
             :background background))))

@@ -308,3 +308,72 @@
 (test command-completion-includes-builtins
   (is (member "cd" (complete :command "c") :test #'string=))
   (is (member "pwd" (complete :command "pw") :test #'string=)))
+
+;;; ===========================================================================
+;;; Redirections:  >  >>  <  2>  2>>
+;;; ===========================================================================
+
+(test tokenize-redirects
+  (is (equal '((:word . "echo") (:word . "hi") (:redir . :out) (:word . "f"))
+             (tokenize "echo hi > f")))
+  (is (equal '((:redir . :out-append) (:word . "f")) (tokenize ">> f")))
+  (is (equal '((:redir . :in) (:word . "f")) (tokenize "< f")))
+  (is (equal '((:word . "c") (:redir . :err) (:word . "f")) (tokenize "c 2> f")))
+  (is (equal '((:word . "c") (:redir . :err-append) (:word . "f")) (tokenize "c 2>> f")))
+  ;; a digit followed by a SPACE then > is a plain arg, not an fd redirect
+  (is (equal '((:word . "echo") (:word . "2") (:redir . :out) (:word . "f"))
+             (tokenize "echo 2 > f"))))
+
+(test parse-attaches-redirections
+  (is (equal '(%shell-run (list (external "echo" "hi" :redirections '((:out . "f"))))
+              :background nil)
+             (parse-shell-line "echo hi > f"))))
+
+(test redirect-stdout-to-file
+  (let ((dir (make-temp-dir)))
+    (let ((*current-directory* dir))
+      (is (null (shell-eval "echo hello-out > out.txt")))     ; output went to file
+      (is (string= "hello-out"
+                   (with-open-file (s (merge-pathnames "out.txt" dir)) (read-line s)))))))
+
+(test redirect-append
+  (let ((dir (make-temp-dir)))
+    (let ((*current-directory* dir))
+      (shell-eval "echo one > f.txt")
+      (shell-eval "echo two >> f.txt")
+      (is (equal '("one" "two")
+                 (with-open-file (s (merge-pathnames "f.txt" dir))
+                   (list (read-line s) (read-line s))))))))
+
+(test redirect-stdin-from-file
+  (let ((dir (make-temp-dir)))
+    (with-open-file (s (merge-pathnames "in.txt" dir) :direction :output)
+      (write-line "keep me" s) (write-line "drop" s))
+    (let ((*current-directory* dir))
+      (is (equal '("keep me") (shell-eval "grep keep < in.txt"))))))
+
+(test redirect-stderr-to-file
+  (let ((dir (make-temp-dir)))
+    (let ((*current-directory* dir))
+      (shell-eval "sh -c 'echo oops 1>&2' 2> err.txt")
+      (is (string= "oops"
+                   (with-open-file (s (merge-pathnames "err.txt" dir)) (read-line s)))))))
+
+(test redirect-target-expands-vars
+  (let ((dir (make-temp-dir)))
+    (sb-posix:setenv "CONSH_OUT" "v.txt" 1)
+    (unwind-protect
+         (let ((*current-directory* dir))
+           (shell-eval "echo x > $CONSH_OUT")
+           (is (probe-file (merge-pathnames "v.txt" dir))))
+      (sb-posix:unsetenv "CONSH_OUT"))))
+
+(test redirect-honors-current-directory
+  "A relative redirect target is created in *current-directory*, not the process
+cwd."
+  (let ((dir (make-temp-dir))
+        (cwd-before (sb-posix:getcwd)))
+    (let ((*current-directory* dir))
+      (shell-eval "echo hi > rel.txt"))
+    (is (probe-file (merge-pathnames "rel.txt" dir)))
+    (is (equal cwd-before (sb-posix:getcwd)))))

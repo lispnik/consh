@@ -93,6 +93,7 @@
    #:runnable-seq
    ;; stage + pipeline objects
    #:stage #:stage-name #:external-stage #:external-stage-p #:stage-invocation
+   #:stage-redirections
    #:lisp-stage #:lisp-stage-p #:stage-xform #:stage-expensive-p #:stage-parallel-p
    #:stage-generator #:generator-stage-p
    #:external #:map-stage #:filter-stage #:mapcat-stage #:emit-stage #:generator-stage

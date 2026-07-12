@@ -21,7 +21,10 @@
   ((name :initarg :name :initform nil :reader stage-name)))
 
 (defclass external-stage (stage)
-  ((invocation :initarg :invocation :reader stage-invocation))
+  ((invocation :initarg :invocation :reader stage-invocation)
+   (redirections :initarg :redirections :initform nil :reader stage-redirections
+                 :documentation "An alist of (KIND . path): :in :out :out-append
+:err :err-append.  From shell < > >> 2> 2>> redirections."))
   (:documentation "A stage that runs an external command."))
 
 (defclass lisp-stage (stage)
@@ -47,14 +50,20 @@ generator stage is a source that emits imperatively."))
 
 (defun external (program &rest args)
   "An external stage for PROGRAM (a namestring, or a ready-made invocation) and
-ARGS."
-  (make-instance 'external-stage
-                 :invocation (if (typep program 'command-invocation)
-                                 program
-                                 (apply #'make-invocation program args))
-                 :name (if (typep program 'command-invocation)
-                           (invocation-program program)
-                           program)))
+ARGS.  A trailing `:redirections ALIST` is peeled off (the shell parser adds it)."
+  (let ((redirs nil))
+    (when (and (>= (length args) 2)
+               (eq (nth (- (length args) 2) args) :redirections))
+      (setf redirs (car (last args))
+            args (butlast args 2)))
+    (make-instance 'external-stage
+                   :invocation (if (typep program 'command-invocation)
+                                   program
+                                   (apply #'make-invocation program args))
+                   :redirections redirs
+                   :name (if (typep program 'command-invocation)
+                             (invocation-program program)
+                             program))))
 
 (defun map-stage (fn &key name expensive parallel)
   "A lisp stage mapping each object through FN."
