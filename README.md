@@ -29,23 +29,65 @@ its FiveAM suite green (**908 checks**).
 ```
 
 
-## Requirements
+## Installation
 
-- **SBCL** (developed on 2.6.5; macOS arm64 and Linux)
-- **[ocicl](https://github.com/ocicl/ocicl)** for dependencies (`cffi`, `fiveam`)
+consh needs **[SBCL](https://www.sbcl.org/)** (developed on 2.6.5; macOS arm64
+and Linux) and **[ocicl](https://github.com/ocicl/ocicl)** for its two
+dependencies (`cffi`, `fiveam`).
+
+**1. Install the prerequisites.**
 
 ```sh
-ocicl install          # restores deps pinned in ocicl.csv into ./ocicl/
+# macOS / Linux / WSL — Homebrew
+brew install sbcl ocicl
+
+# Debian / Ubuntu
+sudo apt install sbcl
+curl -fsSL https://ocicl.github.io/ocicl/deb-repo/ocicl-archive-keyring.gpg \
+  | sudo tee /usr/share/keyrings/ocicl-archive-keyring.asc > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/ocicl-archive-keyring.asc] https://ocicl.github.io/ocicl/deb-repo stable main" \
+  | sudo tee /etc/apt/sources.list.d/ocicl.list
+sudo apt update && sudo apt install ocicl
+
+# Fedora / RHEL
+sudo dnf install sbcl
+sudo dnf config-manager addrepo --from-repofile=https://ocicl.github.io/ocicl/rpm-repo/ocicl.repo
+sudo dnf install ocicl
 ```
 
-Then, from a REPL with the project + `./ocicl/` on your ASDF source registry:
+```sh
+ocicl setup            # one-time: registers the ocicl runtime in ~/.sbclrc
+```
 
+**2. Get consh and its dependencies.**
+
+```sh
+git clone https://github.com/lispnik/consh.git
+cd consh
+ocicl install          # restore deps pinned in ocicl.csv into ./ocicl/
+```
+
+**3. Build the executable** (optional — see "Building a standalone executable"),
+and put it on your `PATH`:
+
+```sh
+sbcl --non-interactive --eval '(asdf:make :consh)'   # -> ./consh
+install -m 755 consh ~/.local/bin/consh              # or /usr/local/bin (sudo)
+consh
+```
+
+**Or use it from a REPL** — which is how the examples below run (`=>` shows the
+real returned value):
+
+```sh
+sbcl                   # run inside the cloned repo
+```
 ```lisp
 (asdf:load-system :consh)
 (in-package :consh)
 ```
 
-Everything below runs at that REPL. `=>` shows the real returned value.
+Run the tests with `sbcl --non-interactive --eval '(asdf:test-system :consh)'`.
 
 
 ## The idea: objects, not bytes
@@ -246,18 +288,15 @@ names itself; a stderr flood doesn't deadlock; C-z freezes and resumes intact;
 ## Building a standalone executable
 
 The `consh` system is wired for ASDF's `program-op`, so it dumps a self-contained
-image with a REPL entry point:
-
-```sh
-sbcl --non-interactive --eval '(asdf:make :consh)'   # -> ./consh
-```
+image with a REPL entry point (`consh:main`):
 
 ```console
-$ printf 'echo hello from the image\nseq 1 3 | grep 2\n(+ 40 2)\n' | ./consh
+$ sbcl --non-interactive --eval '(asdf:make :consh)'    # -> ./consh
+$ printf 'echo hi from the image\nseq 1 3 | grep 2\n(+ 40 2)\n' | ./consh
 consh — a Common Lisp Unix shell (objects, not bytes). Ctrl-D to exit.
-consh …/consh/> hello from the image
-consh …/consh/> 2
-consh …/consh/> 42
+consh consh> hi from the image
+consh consh> 2
+consh consh> 42
 ```
 
 (The FFI re-resolves its cached libc symbol pointers on image startup via
