@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (SBCL / Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sbcl
+          sbcl --version
+
+      # ocicl.csv pins the dependency versions; cache the fetched sources so
+      # `ocicl install` is a no-op restore when the lockfile is unchanged.
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ocicl
+          key: ocicl-${{ runner.os }}-${{ hashFiles('ocicl.csv') }}
+
+      - name: Install ocicl
+        run: |
+          git clone --depth 1 https://github.com/ocicl/ocicl.git /tmp/ocicl
+          make -C /tmp/ocicl
+          sudo make -C /tmp/ocicl install
+          ocicl setup
+          ocicl version
+
+      - name: Restore dependencies (from ocicl.csv)
+        run: ocicl install
+
+      - name: Run test suite
+        run: |
+          cat > /tmp/run-tests.lisp <<'LISP'
+          (require :asdf)
+          ;; Find both the project system and the fetched deps under ./ocicl,
+          ;; independent of ocicl's ~/.sbclrc integration (we skip it below).
+          (asdf:initialize-source-registry
+            (list :source-registry (list :tree (truename ".")) :inherit-configuration))
+          (handler-case (asdf:load-system :consh/test)
+            (serious-condition (e)
+              (format *error-output* "~&LOAD FAILED: ~A~%" e)
+              (sb-ext:exit :code 2)))
+          (unless (fiveam:run! (find-symbol "CONSH" (find-package :consh/test)))
+            (sb-ext:exit :code 1))
+          LISP
+          sbcl --noinform --no-userinit --no-sysinit --non-interactive --load /tmp/run-tests.lisp

@@ -1,5 +1,7 @@
 # consh
 
+[![CI](https://github.com/lispnik/consh/actions/workflows/ci.yml/badge.svg)](https://github.com/lispnik/consh/actions/workflows/ci.yml)
+
 A Unix shell implemented as a Common Lisp image — **pipelines carry CLOS
 objects, not bytes.**
 
