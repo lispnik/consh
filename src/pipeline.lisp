@@ -25,13 +25,20 @@
   (:documentation "A stage that runs an external command."))
 
 (defclass lisp-stage (stage)
-  ((xform :initarg :xform :reader stage-xform
-          :documentation "A transducer: (emit) -> (lambda (object) ...).")
+  ((xform :initarg :xform :initform nil :reader stage-xform
+          :documentation "A transducer: (emit) -> (lambda (object) ...).  NIL for
+a generator (source) stage.")
+   (generator :initarg :generator :initform nil :reader stage-generator
+              :documentation "For a source stage: a function (emit) that emits
+values imperatively, ignoring upstream input.  NIL for transducer stages.")
    (expensive :initarg :expensive :initform nil :reader stage-expensive-p)
    (parallel  :initarg :parallel  :initform nil :reader stage-parallel-p))
   (:documentation
-   "An in-image stage transforming an object sequence.  Represented as a
-transducer so consecutive lisp stages fuse into one thread by composition."))
+   "An in-image stage transforming an object sequence.  A transducer stage is
+represented so consecutive ones fuse into a single thread by composition; a
+generator stage is a source that emits imperatively."))
+
+(defun generator-stage-p (s) (and (lisp-stage-p s) (stage-generator s)))
 
 (defun external-stage-p (s) (typep s 'external-stage))
 (defun lisp-stage-p (s) (typep s 'lisp-stage))
@@ -67,6 +74,22 @@ ARGS."
                  :parallel parallel
                  :xform (lambda (emit) (lambda (x) (mapc emit (funcall fn x))))))
 
+(defun emit-stage (fn &key name expensive parallel)
+  "An imperative transform stage: FN is called as (FN input emit) for each input
+object, and may call (funcall emit value) zero or more times.  The imperative
+sibling of map/filter/mapcat — use it when what you emit depends on accumulated
+state or arbitrary control flow.  Fuses like the other transducer stages."
+  (make-instance 'lisp-stage :name (or name "emit") :expensive expensive
+                 :parallel parallel
+                 :xform (lambda (emit) (lambda (x) (funcall fn x emit)))))
+
+(defun generator-stage (fn &key name expensive parallel)
+  "A source stage: FN is called as (FN emit) once and may call (funcall emit
+value) any number of times.  Ignores upstream input, so it heads a pipeline (or
+group).  Backpressure still applies — emit is a channel put."
+  (make-instance 'lisp-stage :name (or name "generate") :expensive expensive
+                 :parallel parallel :generator fn))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Pipeline
 ;;; ---------------------------------------------------------------------------
@@ -89,16 +112,20 @@ ARGS."
   (defun %expand-pipe-clause (clause)
     "Expand one `pipe` clause into a stage-constructing form.
   (cmd arg...)        -> external command named CMD (a symbol)
-  (:map f ...keys)    -> map-stage
-  (:filter p ...keys) -> filter-stage
-  (:mapcat f ...keys) -> mapcat-stage
-  (:external p a...)  -> external with an explicit program string"
+  (:map f ...keys)        -> map-stage
+  (:filter p ...keys)     -> filter-stage
+  (:mapcat f ...keys)     -> mapcat-stage
+  (:emit (x emit) body)   -> emit-stage      (imperative per-object)
+  (:generate (emit) body) -> generator-stage (imperative source)
+  (:external p a...)      -> external with an explicit program string"
     (cond
       ((and (consp clause) (keywordp (car clause)))
        (ecase (car clause)
          (:map    `(map-stage    ,(second clause) ,@(cddr clause)))
          (:filter `(filter-stage ,(second clause) ,@(cddr clause)))
          (:mapcat `(mapcat-stage ,(second clause) ,@(cddr clause)))
+         (:emit     `(emit-stage      (lambda ,(second clause) ,@(cddr clause))))
+         (:generate `(generator-stage (lambda ,(second clause) ,@(cddr clause))))
          (:external `(external ,@(rest clause)))))
       ((and (consp clause) (symbolp (car clause)))
        `(external ,(string-downcase (symbol-name (car clause))) ,@(rest clause)))
@@ -136,6 +163,12 @@ ARGS."
              ((or (stage-expensive-p s) (stage-parallel-p s))
               (flush)
               (push (list :lisp s) groups))
+             ;; a generator (source) starts a fresh lisp group it heads; later
+             ;; fusible transducers append to it
+             ((stage-generator s)
+              (flush)
+              (setf current-kind :lisp)
+              (push s current))
              (t
               (unless (eq current-kind :lisp) (flush) (setf current-kind :lisp))
               (push s current))))))

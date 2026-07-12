@@ -221,9 +221,13 @@ stage's stdout is parsed into the returned object-seq.  Updates STATE."
 ;;; ---------------------------------------------------------------------------
 
 (defun %run-lisp-group (stages input-seq state)
-  "Run fused lisp STAGES as one worker: read INPUT-SEQ, apply the composed
-transducer, emit into a fresh channel.  Returns the output object-seq."
-  (let* ((xform (compose-xforms stages))
+  "Run fused lisp STAGES as one worker.  A transducer group reads INPUT-SEQ and
+applies the composed transducer to each object; a group headed by a GENERATOR
+source runs the generator, feeding its emitted values through the remaining
+fused transducers.  Emits into a fresh channel; returns the output object-seq."
+  (let* ((generator (stage-generator (first stages)))
+         ;; a generator heads its group; the rest are the fused transducers
+         (xform (compose-xforms (if generator (rest stages) stages)))
          (out (make-channel))
          (thread
            (spawn-stage-thread
@@ -232,14 +236,19 @@ transducer, emit into a fresh channel.  Returns the output object-seq."
                    (call-with-worker-guard "lisp"
                     (lambda ()
                       (handler-case
-                          (let ((step (funcall xform (lambda (o) (channel-put out o)))))
-                            (when input-seq
-                              (do-object-seq (x input-seq)
-                                ;; per-object restart so a parked lisp worker can
-                                ;; be told to skip a bad object (SPEC §5)
-                                (restart-case (funcall step x)
-                                  (skip-object ()
-                                    :report "Skip this object and continue.")))))
+                          (let* ((sink (lambda (o) (channel-put out o)))
+                                 (step (funcall xform sink))
+                                 ;; each emitted object flows through the fused
+                                 ;; transducers, with a skip-object restart so a
+                                 ;; parked worker can drop a bad one (SPEC §5)
+                                 (emit (lambda (x)
+                                         (restart-case (funcall step x)
+                                           (skip-object ()
+                                             :report "Skip this object and continue.")))))
+                            (if generator
+                                (funcall generator emit)
+                                (when input-seq
+                                  (do-object-seq (x input-seq) (funcall emit x)))))
                         ;; downstream cancelled: stop and cascade upstream
                         (channel-closed () (when input-seq (seq-close input-seq))))))
                 (close-channel out)))

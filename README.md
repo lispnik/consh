@@ -139,6 +139,16 @@ where objects help.
  (make-pipeline (list (external (make-invocation "ls" "/tmp/consh-demo"))
                       (filter-stage (lambda (f) (> (file-size f) 5))))))
 => file-info objects for data.bin (10) and logs/ (64)
+
+;; imperative stages when map/filter/mapcat don't fit: emit-stage hands your
+;; body an `emit` function you call 0+ times (here, a stateful running total);
+;; generator-stage is a pure-Lisp source.
+(let ((sum 0))
+  (pipeline-collect
+   (make-pipeline (list (external "seq" "1" "5")
+                        (emit-stage (lambda (n emit)
+                                      (funcall emit (incf sum (parse-integer n)))))))))
+=> (1 3 6 10 15)
 ```
 
 Output is **lazy**. Taking a prefix cancels the producer — and kills the

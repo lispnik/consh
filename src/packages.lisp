@@ -94,7 +94,8 @@
    ;; stage + pipeline objects
    #:stage #:stage-name #:external-stage #:external-stage-p #:stage-invocation
    #:lisp-stage #:lisp-stage-p #:stage-xform #:stage-expensive-p #:stage-parallel-p
-   #:external #:map-stage #:filter-stage #:mapcat-stage
+   #:stage-generator #:generator-stage-p
+   #:external #:map-stage #:filter-stage #:mapcat-stage #:emit-stage #:generator-stage
    #:pipeline #:make-pipeline #:pipeline-stages #:pipe
    ;; plumbing analysis
    #:pipeline-groups #:pipeline-plan #:compose-xforms

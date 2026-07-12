@@ -504,3 +504,101 @@ consumes it correctly: find | grep still works (find is not -print0'd here)."
                                          (external "grep" "log"))))))
       (is (= 1 (length matches)))
       (is (search "keep.log" (first matches))))))
+
+;;; ===========================================================================
+;;; Imperative stages: emit-stage (transform) and generator-stage (source)
+;;; ===========================================================================
+
+(test emit-stage-expands-one-to-many
+  (is (equal '("a" "a" "b" "b")
+             (pipeline-collect
+              (make-pipeline (list (emit-lines-cmd "a" "b")
+                                   (emit-stage (lambda (x emit)
+                                                 (funcall emit x)
+                                                 (funcall emit x)))))))))
+
+(test emit-stage-can-emit-nothing
+  "Emitting zero times for some inputs makes emit-stage a filter."
+  (is (equal '("2" "4")
+             (pipeline-collect
+              (make-pipeline (list (emit-lines-cmd "1" "2" "3" "4")
+                                   (emit-stage (lambda (x emit)
+                                                 (when (evenp (parse-integer x))
+                                                   (funcall emit x))))))))))
+
+(test emit-stage-is-stateful
+  "The imperative sibling of map/filter: emit a value derived from accumulated
+state (a running total) — which map/filter/mapcat cannot express."
+  (let ((sum 0))
+    (is (equal '(1 3 6 10 15)
+               (pipeline-collect
+                (make-pipeline (list (external "seq" "1" "5")
+                                     (emit-stage (lambda (n emit)
+                                                   (funcall emit (incf sum (parse-integer n)))))))))))
+  ;; windowing / lookahead across inputs: emit each ascending adjacent pair
+  (let ((prev nil))
+    (is (equal '((1 . 4) (2 . 9))
+               (pipeline-collect
+                (run-pipeline
+                 (make-pipeline
+                  (list (emit-stage (lambda (x emit)
+                                      (when (and prev (> x prev)) (funcall emit (cons prev x)))
+                                      (setf prev x)))))
+                 :input '(1 4 2 9 3)))))))
+
+(test emit-stage-fuses-with-adjacent-transducers
+  (let ((r (run-pipeline (make-pipeline
+                          (list (emit-lines-cmd "1" "2" "3")
+                                (map-stage #'parse-integer)
+                                (emit-stage (lambda (n emit) (funcall emit (* n 10))))
+                                (filter-stage (lambda (n) (> n 15))))))))
+    (unwind-protect
+         (progn
+           (is (equal '(20 30) (seq-collect (pipeline-result-seq r))))
+           ;; the three lisp stages fuse into ONE worker
+           (is (= 1 (length (consh::run-state-worker-threads (pipeline-result-state r))))))
+      (consh::%teardown (pipeline-result-state r)))))
+
+(test emit-stage-via-pipe-macro
+  (is (equal '("A" "B")
+             (pipeline-collect
+              (pipe (:generate (emit) (dolist (w '("a" "STOP" "b")) (funcall emit w)))
+                    (:emit (w emit) (unless (string= w "STOP")
+                                      (funcall emit (string-upcase w)))))))))
+
+(test generator-stage-is-a-source
+  (is (equal '(0 1 4 9 16)
+             (pipeline-collect
+              (make-pipeline (list (generator-stage
+                                    (lambda (emit) (dotimes (i 5) (funcall emit (* i i)))))))))))
+
+(test generator-heads-its-own-fused-group
+  (let ((r (run-pipeline (make-pipeline
+                          (list (generator-stage (lambda (emit) (dotimes (i 6) (funcall emit i))))
+                                (filter-stage #'evenp)
+                                (map-stage #'1+))))))
+    (unwind-protect
+         (progn
+           (is (equal '(1 3 5) (seq-collect (pipeline-result-seq r))))
+           (is (= 1 (length (consh::run-state-worker-threads (pipeline-result-state r))))))
+      (consh::%teardown (pipeline-result-state r))))
+  ;; grouping: generator + transducers = a single :lisp group
+  (is (equal '(:lisp)
+             (mapcar #'car
+                     (pipeline-groups
+                      (pipe (:generate (emit) (funcall emit 1)) (:map #'1+) (:filter #'oddp)))))))
+
+(test generator-feeds-an-external
+  "A Lisp generator source can feed an external's stdin (lisp -> external)."
+  (is (equal '("alpha" "beta")
+             (pipeline-collect
+              (make-pipeline (list (generator-stage
+                                    (lambda (emit) (funcall emit "alpha") (funcall emit "beta")))
+                                   (external "cat")))))))
+
+(test take-from-infinite-generator-terminates
+  "Backpressure + cancellation apply to a generator: taking a prefix stops it."
+  (let ((seq (run-pipeline (make-pipeline
+                            (list (generator-stage
+                                   (lambda (emit) (loop for i from 0 do (funcall emit i)))))))))
+    (is (equal '(0 1 2 3 4) (take 5 seq)))))
