@@ -25,7 +25,8 @@
                (:file "pipeline")
                (:file "exec")
                (:file "jobs")
-               (:file "surface"))
+               (:file "surface")
+               (:file "lineedit"))
   :in-order-to ((test-op (test-op "consh/test"))))
 
 (defsystem "consh/test"
@@ -40,6 +41,7 @@
                (:file "parse")
                (:file "pipeline")
                (:file "jobs")
-               (:file "surface"))
+               (:file "surface")
+               (:file "lineedit"))
   :perform (test-op (op c)
              (symbol-call :fiveam :run! (find-symbol "CONSH" :consh/test))))

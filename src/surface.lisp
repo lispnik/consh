@@ -538,41 +538,5 @@ command, a `,`/`(`-led token is a symbol, otherwise a path."
            (complete :symbol (string-left-trim ",(" token)))
           (t (complete :path token)))))
 
-;;; ---------------------------------------------------------------------------
-;;; A minimal REPL tying it together (interactive; not exercised by tests)
-;;; ---------------------------------------------------------------------------
-
-(defun %present (result out)
-  (if (listp result)
-      (dolist (x result) (format out "~&~A~%" x))
-      (format out "~&~S~%" result)))
-
-(defun shell-repl (&key (in *standard-input*) (out *standard-output*))
-  "Read-eval-print loop over surface syntax.  Reports pending job events before
-each prompt and presents results via print-object.  Ctrl-C aborts the current
-line; EOF (Ctrl-D) ends the loop."
-  (loop
-    (dolist (event (take-job-events)) (format out "~&[~A]~%" event))
-    (write-string (prompt) out)
-    (finish-output out)
-    (let ((line (read-line in nil nil)))
-      (when (null line) (return))
-      (unless (zerop (length (string-trim '(#\Space #\Tab) line)))
-        (handler-case (%present (shell-eval line) out)
-          (shell-exit (c) (return (shell-exit-code c)))     ; `exit`
-          (sb-sys:interactive-interrupt () (format out "~&^C~%"))
-          (error (e) (format out "~&Error: ~A~%" e)))))))
-
-(defun main ()
-  "Entry point for a dumped consh executable: greet, run the REPL, exit cleanly."
-  ;; A saved image baked in *current-directory* at build time; adopt the real
-  ;; working directory the executable was launched from.
-  (ignore-errors
-   (setf *current-directory*
-         (truename (pathname (format nil "~A/" (sb-posix:getcwd))))))
-  (format t "consh — a Common Lisp Unix shell (objects, not bytes). Ctrl-D to exit.~%")
-  (finish-output)
-  (handler-case (shell-repl)
-    (sb-sys:interactive-interrupt () (terpri)))
-  (finish-output)
-  (sb-ext:exit :code 0))
+;;; The REPL (shell-repl / main) lives in lineedit.lisp, which loads after this
+;;; file and adds the interactive line editor it uses.

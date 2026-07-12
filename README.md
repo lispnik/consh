@@ -270,6 +270,11 @@ completion as a generic function:
 (complete :path "re" :directory d)     ; filesystem entries
 ```
 
+On an interactive terminal the REPL uses a line editor with **Tab completion**,
+**Up/Down history**, and Emacs-ish keys (`^A`/`^E`/`^K`/`^U`, arrows); it falls
+back to plain `read-line` for pipes and scripts. **Ctrl-C** aborts the current
+line, or tears down a running foreground job; **Ctrl-D** exits.
+
 
 ## How it's built
 

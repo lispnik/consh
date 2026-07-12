@@ -132,4 +132,7 @@
    #:history-result #:last-result #:clear-history
    #:*prompt-function* #:default-prompt #:prompt
    #:complete #:complete-line
-   #:main))
+   ;; line editor
+   #:*line-history* #:record-line #:make-ledit #:ledit #:ledit-text #:ledit-point
+   #:ledit-key #:ledit-complete #:read-line-edited #:interactive-terminal-p
+   #:shell-repl #:main))

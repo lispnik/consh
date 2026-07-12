@@ -122,6 +122,30 @@ completes via SIGPIPE without hanging."
   (is (= 10 (length (pipeline-collect
                      (make-pipeline (list (external "yes") (external "head"))))))))
 
+(test interrupt-during-foreground-kills-processes
+  "C-c during a foreground command: an interrupt in the collecting thread unwinds
+through pipeline-collect's teardown, killing and reaping the processes (this is
+how the REPL's Ctrl-C handling stops a running job)."
+  (stop-reaper)
+  (ensure-reaper)
+  (unwind-protect
+       (let ((th (sb-thread:make-thread
+                  (lambda ()
+                    (handler-case
+                        (pipeline-collect
+                         (make-pipeline (list (external "sh" "-c" "sleep 30"))))
+                      (serious-condition () :interrupted))))))
+         (sleep 0.3)
+         (sb-thread:interrupt-thread th (lambda () (error "simulated C-c")))
+         (sb-thread:join-thread th)
+         (sleep 0.15)
+         (stop-reaper)
+         (multiple-value-bind (pid raw errno) (c-waitpid -1 +wnohang+)
+           (declare (ignore raw))
+           (is (= -1 pid))
+           (is (= +echild+ errno))))                   ; the sleep was killed + reaped
+    (ensure-reaper)))
+
 ;;; ===========================================================================
 ;;; stderr draining (no deadlock)
 ;;; ===========================================================================
