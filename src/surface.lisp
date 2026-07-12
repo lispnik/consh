@@ -184,7 +184,9 @@ desugared command.  Records (form . result) in *history*.  Returns
 ;;; ---------------------------------------------------------------------------
 
 (defun default-prompt ()
-  (format nil "consh ~A> " (namestring *current-directory*)))
+  (let* ((dir (pathname-directory *current-directory*))
+         (name (if (and (consp dir) (cdr dir)) (car (last dir)) "/")))
+    (format nil "consh ~A> " name)))
 
 (defvar *prompt-function* #'default-prompt
   "A function of no arguments returning the prompt string.")
@@ -306,6 +308,11 @@ line; EOF (Ctrl-D) ends the loop."
 
 (defun main ()
   "Entry point for a dumped consh executable: greet, run the REPL, exit cleanly."
+  ;; A saved image baked in *current-directory* at build time; adopt the real
+  ;; working directory the executable was launched from.
+  (ignore-errors
+   (setf *current-directory*
+         (truename (pathname (format nil "~A/" (sb-posix:getcwd))))))
   (format t "consh — a Common Lisp Unix shell (objects, not bytes). Ctrl-D to exit.~%")
   (finish-output)
   (handler-case (shell-repl)

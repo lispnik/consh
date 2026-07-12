@@ -134,8 +134,9 @@
 ;;; ===========================================================================
 
 (test default-prompt-mentions-cwd
+  "The default prompt names the current directory (its final component)."
   (let ((*current-directory* #P"/tmp/consh-prompt-xyz/"))
-    (is (search "/tmp/consh-prompt-xyz/" (prompt)))))
+    (is (search "consh-prompt-xyz" (prompt)))))
 
 (test prompt-function-is-customizable
   (let ((*prompt-function* (lambda () "$$ ")))
