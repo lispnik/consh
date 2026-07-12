@@ -127,7 +127,16 @@ so it is closed once, via the stream."
 object-seq or NIL) feeds the first stage's stdin via an unparse pump; the last
 stage's stdout is parsed into the returned object-seq.  Updates STATE."
   (let* ((n (length stages))
-         (invs (mapcar #'stage-invocation stages))
+         ;; run-and-parse's rewrite half (SPEC §2): the LAST external of the run
+         ;; is the only one whose stdout consh parses, so it — and only it — may
+         ;; be rewritten to request a machine-readable format (e.g. find ->
+         ;; -print0).  Intermediate externals feed the next process over a kernel
+         ;; pipe and must keep their normal (newline) output, so they are not
+         ;; rewritten.  The rewritten tail invocation is used for BOTH the spawn
+         ;; and the parse, keeping the requested format and the parser in sync.
+         (raw-invs (mapcar #'stage-invocation stages))
+         (invs (append (butlast raw-invs)
+                       (list (rewrite-invocation (car (last raw-invs))))))
          (internal (loop repeat (1- n) collect (multiple-value-list (%pipe state))))
          (stderr-pipes (loop repeat n collect (multiple-value-list (%pipe state))))
          ;; boundary pipes

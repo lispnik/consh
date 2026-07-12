@@ -464,3 +464,43 @@ started (no leaked processes)."
   ;; still healthy afterward
   (is (equal '("done")
              (pipeline-collect (make-pipeline (list (emit-lines-cmd "done")))))))
+
+;;; ===========================================================================
+;;; run-and-parse rewrite is applied to the run's tail (SPEC §2)
+;;; ===========================================================================
+
+(test find-pipeline-yields-pathname-objects
+  (let ((dir (make-temp-dir)))
+    (with-open-file (s (merge-pathnames "one.txt" dir) :direction :output)
+      (write-string "x" s))
+    (let ((paths (pipeline-collect
+                  (make-pipeline (list (external "find" (namestring dir) "-type" "f"))))))
+      (is (every #'pathnamep paths))
+      (is (member "one.txt" paths :key #'file-namestring :test #'string=)))))
+
+(test executor-rewrites-tail-to-print0
+  "The executor applies rewrite-invocation to the run's tail: `find` gets
+-print0, so a filename containing a newline stays a SINGLE pathname.  Newline
+line-splitting (no rewrite) would return it as two bogus records."
+  (let* ((dir (make-temp-dir))
+         (weird (merge-pathnames
+                 (make-pathname :name (format nil "a~Cb" #\Newline) :type "txt") dir)))
+    (with-open-file (s weird :direction :output) (write-string "x" s))
+    (let ((paths (pipeline-collect
+                  (make-pipeline (list (external "find" (namestring dir) "-type" "f"))))))
+      (is (= 1 (length paths)))                         ; NUL-delimited: one record
+      (is (pathnamep (first paths))))))
+
+(test intermediate-external-is-not-rewritten
+  "An intermediate external keeps normal (newline) output so the next external
+consumes it correctly: find | grep still works (find is not -print0'd here)."
+  (let ((dir (make-temp-dir)))
+    (with-open-file (s (merge-pathnames "keep.log" dir) :direction :output)
+      (write-string "x" s))
+    (with-open-file (s (merge-pathnames "skip.txt" dir) :direction :output)
+      (write-string "x" s))
+    (let ((matches (pipeline-collect
+                    (make-pipeline (list (external "find" (namestring dir) "-type" "f")
+                                         (external "grep" "log"))))))
+      (is (= 1 (length matches)))
+      (is (search "keep.log" (first matches))))))
