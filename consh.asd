@@ -4,7 +4,7 @@
   :description "A Unix shell implemented as a Common Lisp image. Pipelines carry CLOS objects, not bytes."
   :author "Matthew Kennedy <burnsidemk@gmail.com>"
   :license "MIT"
-  :depends-on ("cffi")
+  :depends-on ("cffi" "com.inuoe.jzon")
   :serial t
   ;; `asdf:make :consh` dumps a standalone executable via program-op.
   :build-operation "program-op"
@@ -25,7 +25,8 @@
                              (:file "grep")
                              (:file "stat")
                              (:file "git")
-                             (:file "ps")))
+                             (:file "ps")
+                             (:file "lsblk")))
                (:file "pipeline")
                (:file "exec")
                (:file "jobs")

@@ -99,6 +99,8 @@
    #:git-status-staged-p #:git-status-unstaged-p
    #:ps-invocation #:ps-process #:ps-process-pid #:ps-process-ppid
    #:ps-process-user #:ps-process-rss #:ps-process-state #:ps-process-command
+   #:lsblk-invocation #:block-device #:block-device-name #:block-device-size
+   #:block-device-type #:block-device-mountpoint #:block-device-children
    ;; ---- Phase 4: pipeline compiler + executor ----
    #:runnable-seq
    ;; stage + pipeline objects

@@ -685,3 +685,76 @@ objects; our own SBCL process is among them."
     (is (typep me 'ps-process))
     (is (= mypid (ps-process-pid me)))
     (is (search "sbcl" (string-downcase (ps-process-command me))))))
+
+;;; ===========================================================================
+;;; lsblk wrapper: JSON document -> block-device objects (SPEC §2 top tier)
+;;; ===========================================================================
+
+(defparameter +lsblk-json+
+  "{\"blockdevices\":[
+      {\"name\":\"sda\",\"size\":\"100G\",\"type\":\"disk\",\"mountpoint\":null,
+       \"children\":[
+         {\"name\":\"sda1\",\"size\":\"1G\",\"type\":\"part\",\"mountpoint\":\"/boot\"},
+         {\"name\":\"sda2\",\"size\":\"99G\",\"type\":\"part\",\"mountpoint\":\"/\"}]},
+      {\"name\":\"sr0\",\"size\":\"1024M\",\"type\":\"rom\",\"mountpoint\":null}]}"
+  "A controlled `lsblk --json` document, for platform-independent parse tests.")
+
+(test lsblk-parses-json-into-block-devices
+  (let* ((inv (make-invocation "lsblk" "-J"))
+         (devs (seq-collect (parse-output inv (make-string-input-stream +lsblk-json+)))))
+    (is (= 2 (length devs)))
+    (is (every (lambda (d) (typep d 'block-device)) devs))
+    (destructuring-bind (sda sr0) devs
+      (is (string= "sda" (block-device-name sda)))
+      (is (string= "disk" (block-device-type sda)))
+      (is (string= "100G" (block-device-size sda)))
+      (is (null (block-device-mountpoint sda)))         ; JSON null -> NIL
+      (is (string= "rom" (block-device-type sr0)))
+      (is (null (block-device-children sr0))))))
+
+(test lsblk-nests-children-recursively
+  (let* ((inv (make-invocation "lsblk" "-J"))
+         (sda (first (seq-collect (parse-output inv (make-string-input-stream +lsblk-json+)))))
+         (kids (block-device-children sda)))
+    (is (= 2 (length kids)))
+    (is (every (lambda (d) (typep d 'block-device)) kids))
+    (is (string= "sda1" (block-device-name (first kids))))
+    (is (string= "/boot" (block-device-mountpoint (first kids))))
+    (is (string= "/" (block-device-mountpoint (second kids))))))
+
+(test lsblk-rewrite-requests-json
+  (is (equal '("-J") (invocation-arguments (rewrite-invocation (make-invocation "lsblk")))))
+  ;; preserves other args, appends -J
+  (is (equal '("-b" "-J")
+             (invocation-arguments (rewrite-invocation (make-invocation "lsblk" "-b")))))
+  ;; idempotent for -J and --json
+  (let ((j (make-invocation "lsblk" "-J")))
+    (is (eq j (rewrite-invocation j))))
+  (let ((j (make-invocation "lsblk" "--json")))
+    (is (eq j (rewrite-invocation j)))))
+
+(test lsblk-malformed-json-signals
+  (signals parse-error
+    (consh::%lsblk-devices (make-invocation "lsblk") "not json at all"))
+  ;; well-formed JSON but not the expected shape also fails
+  (signals parse-error
+    (consh::%lsblk-devices (make-invocation "lsblk") "{\"other\":1}")))
+
+(test lsblk-use-raw-lines-recovers-the-document
+  "With :on-parse-error :use-raw-lines, a bad document falls back to emitting the
+raw text rather than aborting the stream."
+  (let* ((inv (make-invocation "lsblk"))
+         (out (seq-collect
+               (parse-output inv (make-string-input-stream "garbage {")
+                             :on-parse-error :use-raw-lines))))
+    (is (= 1 (length out)))
+    (is (search "garbage" (first out)))))
+
+(test lsblk-real-json-when-available
+  "On Linux, run the real `lsblk`: the wrapper requests -J and yields
+block-device objects.  Elsewhere (e.g. macOS) lsblk is absent and the launch
+spawn-errors — which we accept."
+  (handler-case
+      (let ((devs (pipeline-collect (make-pipeline (list (external "lsblk"))))))
+        (is (every (lambda (d) (typep d 'block-device)) devs)))
+    (spawn-error () (is-true t))))    ; lsblk not on this platform
