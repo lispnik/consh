@@ -7,7 +7,7 @@ objects, not bytes.**
 
 <p align="center">
   <img src="assets/demo.gif" width="820"
-       alt="A consh session: a seq|grep pipeline whose grep hands back a match object (line number + text), then `ls` yielding file-info objects, filtering those objects by a Lisp predicate on file-size, folding find's enriched output into a byte total, and a $()-escape to Lisp — all at one prompt.">
+       alt="A consh session: a seq|grep pipeline whose grep hands back a match object (line number + text), then `ls` yielding file-info objects, filtering those objects by a Lisp predicate on file-size, folding find's enriched output into a byte total, and rendering an object stream as an aligned table — all at one prompt.">
 </p>
 
 Text exists only at the boundary with external processes and the terminal.
@@ -18,7 +18,7 @@ POSIX-compliant: there is no string `eval`, no word-splitting layer — argument
 are Lisp values and globbing returns pathnames.
 
 Built on SBCL in the phase order of [`SPEC.md`](SPEC.md), each phase ending with
-its FiveAM suite green (**1138 checks**).
+its FiveAM suite green (**1223 checks**).
 
 ```
                  bytes                         objects
@@ -110,12 +110,23 @@ tools with native ones without changing call sites:
     #<FILE-INFO data.bin 10 bytes mkennedy>)
 
 ;; an unregistered command falls back to lines of text
-(seq-collect (parse-output (make-invocation "wc")
+(seq-collect (parse-output (make-invocation "tr")
                            (make-string-input-stream (format nil "line one~%line two~%"))))
 => ("line one" "line two")
 ```
 
 Adding a wrapper is just `defmethod`s — no change to the shell core.
+
+A **presentation layer** renders any object stream as an aligned table; each
+wrapped type advertises its columns via the `table-columns` generic:
+
+```lisp
+(table (pipeline-collect (pipe (ls))))
+NAME        SIZE  OWNER
+----------  ----  --------
+kernel.img  4096  mkennedy
+notes.txt     14  mkennedy      ; numeric columns right-align automatically
+```
 
 
 ## Pipelines
@@ -287,10 +298,11 @@ line, or tears down a running foreground job; **Ctrl-D** exits.
 | `src/ffi.lisp` | 1 | CFFI: `pipe`, `posix_spawn` (+ file actions incl. per-child `chdir`), `waitpid`, `kill`/`killpg`, `stat`, `getpwuid` |
 | `src/reaper.lisp` | 1 | Process objects; the single, **SIGCHLD-driven** `waitpid` reaper thread; `*current-directory*` (no process-wide `chdir`, ever) |
 | `src/channel.lisp` | 2 | Bounded object channels: backpressure, EOF, downstream cancellation, stop-flag parking |
-| `src/invocation.lisp`, `parse.lisp`, `dialect.lisp`, `wrappers/` | 3 | Per-command parser protocol; lazy channel-backed object sequences; `parse-error` restarts; GNU/BSD **dialect probing** (`stat` picks `-c` vs `-f`); `ls`/`find` **stat-enrich** to `file-info`, `grep -n` → `grep-match` (file/line/text), `cat`, `git status --porcelain`, `ps`, `lsblk -J` **JSON** → `block-device` |
+| `src/invocation.lisp`, `parse.lisp`, `dialect.lisp`, `wrappers/` | 3 | Per-command parser protocol; lazy channel-backed object sequences; `parse-error` restarts; GNU/BSD **dialect probing/translation** (`stat` picks `-c`/`-f`; `sed -i`/`date -d @` rewritten to BSD); `ls`/`find` **stat-enrich** to `file-info`, `grep -n` → `grep-match`, `df` → `filesystem`, `wc` → `wc-count`, `du` → `du-entry`, `git status`, `ps`, `lsblk -J` **JSON** → `block-device` |
 | `src/pipeline.lisp`, `exec.lisp` | 4 | `pipe` macro, plumbing/fusion compiler, pump threads, stderr drainers, `pipeline-result`, cancellation |
 | `src/jobs.lisp` | 5 | Job objects, fg/bg, C-z, job events, `debug-job` cross-thread conditions |
 | `src/surface.lisp` | 6 | Reader sugar, prompt function, history, completion, aliases |
+| `src/present.lisp` | — | Presentation layer: `table` renders an object stream as an aligned grid via each type's `table-columns` |
 
 Thread discipline (SPEC §5): one reaper for the image, woken by a minimal
 SIGCHLD handler (which only signals a semaphore — all `waitpid` work runs in the

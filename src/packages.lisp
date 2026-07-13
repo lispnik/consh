@@ -71,7 +71,8 @@
    ;; invocation objects + registry
    #:command-invocation #:invocation-program #:invocation-arguments
    #:invocation-dialect #:make-invocation #:register-wrapper #:invocation-class-for
-   #:split-flags #:flag-present-p
+   #:split-flags #:flag-present-p #:short-flag-chars #:short-flag-present-p
+   #:split-whitespace #:join-with-space
    ;; protocol generics
    #:parse-output #:parse-error-output #:unparse-input #:command-dialect
    #:rewrite-invocation
@@ -102,6 +103,16 @@
    #:ps-process-user #:ps-process-rss #:ps-process-state #:ps-process-command
    #:lsblk-invocation #:block-device #:block-device-name #:block-device-size
    #:block-device-type #:block-device-mountpoint #:block-device-children
+   ;; wrappers: df / wc / du / sed / date
+   #:df-invocation #:filesystem #:filesystem-device #:filesystem-blocks
+   #:filesystem-used #:filesystem-available #:filesystem-capacity
+   #:filesystem-mount-point
+   #:wc-invocation #:wc-count #:wc-count-lines #:wc-count-words
+   #:wc-count-bytes #:wc-count-file
+   #:du-invocation #:du-entry #:du-entry-blocks #:du-entry-path
+   #:sed-invocation #:date-invocation
+   ;; presentation layer
+   #:table #:table-columns
    ;; ---- Phase 4: pipeline compiler + executor ----
    #:runnable-seq
    ;; stage + pipeline objects

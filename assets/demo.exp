@@ -28,8 +28,8 @@ run {ls}
 run {(pipeline-collect (pipe (ls) (:filter (lambda (f) (> (file-size f) 1000)))))}
 # 4. `find` enriches too: fold file sizes into a total, in Lisp, over objects.
 run {(reduce #'+ (pipeline-collect (pipe (find "."))) :key #'file-size)}
-# 5. Escape to Lisp anywhere with $(...) — it is all one language.
-run {echo $(string-upcase "objects, not bytes")}
+# 5. Present an object stream as an aligned table — the presentation layer.
+run {(table (pipeline-collect (pipe (ls))))}
 expect "> "
 sleep 1.3
 send -- "\x04"

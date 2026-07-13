@@ -52,6 +52,21 @@ the surface layer.)"
   "True if any of NAMES appears in FLAGS."
   (some (lambda (n) (member n flags :test #'string=)) names))
 
+(defun short-flag-chars (arguments)
+  "The set of short-flag characters across ARGUMENTS — every character of each
+single-dash bundle (e.g. \"-rn\" -> #\\r #\\n).  Long --options, operands, and a
+lone \"-\" are ignored.  Wrappers use this to detect bundled short flags."
+  (let ((chars '()))
+    (dolist (a arguments chars)
+      (when (and (stringp a) (> (length a) 1)
+                 (char= (char a 0) #\-)
+                 (char/= (char a 1) #\-))         ; not a long --option
+        (loop for ch across a for i from 0 when (plusp i) do (pushnew ch chars))))))
+
+(defun short-flag-present-p (arguments char)
+  "True if CHAR appears as a short flag anywhere in ARGUMENTS (bundled or not)."
+  (member char (short-flag-chars arguments)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Wrapper registry
 ;;; ---------------------------------------------------------------------------

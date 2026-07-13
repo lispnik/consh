@@ -41,7 +41,7 @@
 
 (test unknown-command-yields-string-lines
   "Acceptance: an unregistered command's output is a lazy sequence of strings."
-  (let ((inv (make-invocation "wc" "-l")))
+  (let ((inv (make-invocation "noop" "-l")))
     (is (typep inv 'command-invocation))
     (is (not (typep inv 'ls-invocation)))
     (is (equal '("line one" "line two")
@@ -49,13 +49,13 @@
 
 (test seq-take-then-collect
   "seq-take yields a prefix and leaves the sequence open for seq-collect."
-  (let ((seq (parse-output (make-invocation "wc")
+  (let ((seq (parse-output (make-invocation "noop")
                            (string-stream-of "a" "b" "c" "d"))))
     (is (equal '("a" "b") (seq-take 2 seq)))
     (is (equal '("c" "d") (seq-collect seq)))))
 
 (test seq-next-signals-end
-  (let ((seq (parse-output (make-invocation "wc") (string-stream-of "only"))))
+  (let ((seq (parse-output (make-invocation "noop") (string-stream-of "only"))))
     (multiple-value-bind (v more) (seq-next seq)
       (is (string= "only" v))
       (is-true more))
@@ -64,7 +64,7 @@
       (is-false more))))
 
 (test do-object-seq-iterates
-  (let ((seq (parse-output (make-invocation "wc") (string-stream-of "1" "2" "3")))
+  (let ((seq (parse-output (make-invocation "noop") (string-stream-of "1" "2" "3")))
         (acc '()))
     (do-object-seq (x seq) (push x acc))
     (is (equal '("1" "2" "3") (nreverse acc)))))
@@ -245,12 +245,12 @@ enriched."
 ;;; ---------------------------------------------------------------------------
 
 (test parse-error-output-default
-  (let ((c (parse-error-output (make-invocation "wc") (make-string-input-stream "boom") 2)))
+  (let ((c (parse-error-output (make-invocation "noop") (make-string-input-stream "boom") 2)))
     (is (typep c 'command-failed))
     (is (= 2 (command-failed-status c)))
     (is (string= "boom" (command-failed-stderr c))))
   ;; status 0 is not a failure
-  (is (null (parse-error-output (make-invocation "wc") nil 0))))
+  (is (null (parse-error-output (make-invocation "noop") nil 0))))
 
 (test grep-exit-code-translation
   "grep's wrapper knows exit 1 = \"no match\" is benign, exit >=2 is an error."
@@ -449,21 +449,21 @@ NUL, and enriches each entry to a FILE-INFO."
 ;;; --- lazy-sequence edges ---------------------------------------------------
 
 (test empty-stream-yields-empty-sequence
-  (is (null (seq-collect (parse-output (make-invocation "wc")
+  (is (null (seq-collect (parse-output (make-invocation "noop")
                                        (make-string-input-stream ""))))))
 
 (test seq-next-on-empty-signals-end
   (multiple-value-bind (v more)
-      (seq-next (parse-output (make-invocation "wc") (make-string-input-stream "")))
+      (seq-next (parse-output (make-invocation "noop") (make-string-input-stream "")))
     (is (null v))
     (is-false more)))
 
 (test seq-take-more-than-available-returns-all
-  (let ((seq (parse-output (make-invocation "wc") (string-stream-of "a" "b" "c"))))
+  (let ((seq (parse-output (make-invocation "noop") (string-stream-of "a" "b" "c"))))
     (is (equal '("a" "b" "c") (seq-take 100 seq)))))
 
 (test take-all-and-beyond-kills-producer
-  (let ((seq (parse-output (make-invocation "wc") (string-stream-of "a" "b"))))
+  (let ((seq (parse-output (make-invocation "noop") (string-stream-of "a" "b"))))
     (is (equal '("a" "b") (take 5 seq)))
     (is-false (sb-thread:thread-alive-p (object-seq-thread seq)))))
 
@@ -475,20 +475,20 @@ NUL, and enriches each entry to a FILE-INFO."
     (is-false (sb-thread:thread-alive-p (object-seq-thread seq)))))
 
 (test producer-thread-finishes-after-collect
-  (let ((seq (parse-output (make-invocation "wc") (string-stream-of "x" "y"))))
+  (let ((seq (parse-output (make-invocation "noop") (string-stream-of "x" "y"))))
     (is (equal '("x" "y") (seq-collect seq)))
     (sb-thread:join-thread (object-seq-thread seq))       ; returns => it ended
     (is-false (sb-thread:thread-alive-p (object-seq-thread seq)))))
 
 (test seq-close-after-drain-is-safe
-  (let ((seq (parse-output (make-invocation "wc") (string-stream-of "a"))))
+  (let ((seq (parse-output (make-invocation "noop") (string-stream-of "a"))))
     (is (equal '("a") (seq-collect seq)))
     (finishes (seq-close seq))
     (finishes (seq-close seq))))                          ; idempotent
 
 (test independent-sequences-do-not-interfere
-  (let ((s1 (parse-output (make-invocation "wc") (string-stream-of "1" "2")))
-        (s2 (parse-output (make-invocation "wc") (string-stream-of "a" "b"))))
+  (let ((s1 (parse-output (make-invocation "noop") (string-stream-of "1" "2")))
+        (s2 (parse-output (make-invocation "noop") (string-stream-of "a" "b"))))
     (is (equal "1" (seq-next s1)))
     (is (equal "a" (seq-next s2)))
     (is (equal "2" (seq-next s1)))
@@ -633,12 +633,12 @@ not the process working directory (consh never chdir's)."
 ;;; --- parse-error-output / command-failed extras ----------------------------
 
 (test parse-error-output-non-integer-status
-  (let ((c (parse-error-output (make-invocation "wc") nil :killed)))
+  (let ((c (parse-error-output (make-invocation "noop") nil :killed)))
     (is (typep c 'command-failed))
     (is (eq :killed (command-failed-status c)))))
 
 (test command-failed-carries-command
-  (let* ((inv (make-invocation "wc"))
+  (let* ((inv (make-invocation "noop"))
          (c (parse-error-output inv (make-string-input-stream "e") 3)))
     (is (eq inv (command-failed-command c)))))
 
@@ -653,7 +653,7 @@ not the process working directory (consh never chdir's)."
                 (unparse-input (make-invocation "cat")
                                '("alpha" "beta" "gamma") s))))
     (is (equal '("alpha" "beta" "gamma")
-               (seq-collect (parse-output (make-invocation "wc")
+               (seq-collect (parse-output (make-invocation "noop")
                                           (make-string-input-stream text)))))))
 
 ;;; --- find extras -----------------------------------------------------------
@@ -875,3 +875,144 @@ spawn-errors — which we accept."
       (let ((devs (pipeline-collect (make-pipeline (list (external "lsblk"))))))
         (is (every (lambda (d) (typep d 'block-device)) devs)))
     (spawn-error () (is-true t))))    ; lsblk not on this platform
+
+;;; ===========================================================================
+;;; df wrapper: portable 1K-block output -> filesystem objects
+;;; ===========================================================================
+
+(defparameter +df-output+
+  "Filesystem     1024-blocks     Used Available Capacity Mounted on
+/dev/disk3s1s1   482797652 12277340  13594644      48% /
+map auto_home            0        0         0     100% /System/Volumes/Data/home
+/dev/disk2             100       50        50      50% /Volumes/My Disk"
+  "A `df -Pk` document exercising spaces in both device name and mount point.")
+
+(defun %df-stream () (make-string-input-stream +df-output+))
+
+(test df-parses-into-filesystem-objects
+  (let* ((inv (make-invocation "df"))
+         (fs (seq-collect (parse-output inv (%df-stream)))))
+    (is (= 3 (length fs)))                              ; header skipped
+    (is (every (lambda (x) (typep x 'filesystem)) fs))
+    (destructuring-bind (root home vol) fs
+      (is (string= "/dev/disk3s1s1" (filesystem-device root)))
+      (is (= 482797652 (filesystem-blocks root)))
+      (is (= 12277340 (filesystem-used root)))
+      (is (= 13594644 (filesystem-available root)))
+      (is (= 48 (filesystem-capacity root)))
+      (is (string= "/" (filesystem-mount-point root)))
+      ;; a device name containing a space (macOS automount)
+      (is (string= "map auto_home" (filesystem-device home)))
+      (is (string= "/System/Volumes/Data/home" (filesystem-mount-point home)))
+      ;; a mount point containing a space
+      (is (string= "/Volumes/My Disk" (filesystem-mount-point vol))))))
+
+(test df-rewrite-requests-portable-1k-blocks
+  (is (equal '("-P" "-k") (invocation-arguments (rewrite-invocation (make-invocation "df")))))
+  ;; idempotent
+  (let ((inv (make-invocation "df" "-P" "-k")))
+    (is (eq inv (rewrite-invocation inv))))
+  ;; inode mode is left alone (different columns)
+  (let ((inv (make-invocation "df" "-i")))
+    (is (eq inv (rewrite-invocation inv)))
+    (is (equal '("plain line")
+               (seq-collect (parse-output inv (string-stream-of "plain line")))))))
+
+(test df-malformed-line-signals
+  (signals parse-error (consh::%parse-df-line (make-invocation "df") "not a df row")))
+
+;;; ===========================================================================
+;;; wc wrapper: line/word/byte counts -> wc-count objects
+;;; ===========================================================================
+
+(test wc-parses-counts-into-objects
+  (let* ((inv (make-invocation "wc" "a.txt" "b.txt"))
+         (cs (seq-collect
+              (parse-output inv (string-stream-of "      10      20     100 a.txt"
+                                                  "       2       4      30 b.txt"
+                                                  "      12      24     130 total")))))
+    (is (= 3 (length cs)))
+    (is (every (lambda (x) (typep x 'wc-count)) cs))
+    (destructuring-bind (a b tot) cs
+      (is (= 10 (wc-count-lines a)))
+      (is (= 20 (wc-count-words a)))
+      (is (= 100 (wc-count-bytes a)))
+      (is (string= "a.txt" (wc-count-file a)))
+      (is (string= "b.txt" (wc-count-file b)))
+      (is (string= "total" (wc-count-file tot))))))
+
+(test wc-stdin-row-has-no-file
+  (let* ((inv (make-invocation "wc"))
+         (c (first (seq-collect (parse-output inv (string-stream-of "   5  10  50"))))))
+    (is (= 5 (wc-count-lines c)))
+    (is (null (wc-count-file c)))))
+
+(test wc-selected-count-stays-string-lines
+  (let ((inv (make-invocation "wc" "-l" "a.txt")))
+    (is (equal '("10 a.txt")
+               (seq-collect (parse-output inv (string-stream-of "10 a.txt")))))))
+
+;;; ===========================================================================
+;;; du wrapper: size<TAB>path -> du-entry objects
+;;; ===========================================================================
+
+(test du-parses-tab-separated-entries
+  (let* ((inv (make-invocation "du"))
+         (es (seq-collect
+              (parse-output inv (string-stream-of (format nil "16~C." #\Tab)
+                                                  (format nil "8~C./src" #\Tab))))))
+    (is (every (lambda (x) (typep x 'du-entry)) es))
+    (is (equal '(16 8) (mapcar #'du-entry-blocks es)))
+    (is (equal '("." "./src") (mapcar #'du-entry-path es)))))
+
+(test du-rewrite-requests-1k-blocks
+  (is (equal '("-k" "-s" ".")
+             (invocation-arguments (rewrite-invocation (make-invocation "du" "-s" ".")))))
+  (let ((inv (make-invocation "du" "-k")))
+    (is (eq inv (rewrite-invocation inv)))))
+
+(test du-malformed-line-signals
+  (signals parse-error (consh::%parse-du-line (make-invocation "du") "no tab here")))
+
+;;; ===========================================================================
+;;; sed / date: GNU->BSD dialect translation (SPEC §2)
+;;; ===========================================================================
+
+(defun %force-dialect (invocation dialect)
+  (setf (invocation-dialect invocation) dialect)
+  invocation)
+
+(test sed-translates-inplace-and-extended-regexp-on-bsd
+  (is (equal '("-i" "" "-E" "s/a/b/" "f")
+             (consh::%sed-translate-to-bsd '("-i" "-r" "s/a/b/" "f"))))
+  (is (equal '("-i" ".bak" "s/a/b/" "f")
+             (consh::%sed-translate-to-bsd '("-i.bak" "s/a/b/" "f"))))
+  (is (equal '("-i" "" "s/a/b/") (consh::%sed-translate-to-bsd '("--in-place" "s/a/b/"))))
+  (is (equal '("-i" "x" "s/a/b/") (consh::%sed-translate-to-bsd '("--in-place=x" "s/a/b/"))))
+  ;; through rewrite-invocation with a forced dialect
+  (let ((bsd (%force-dialect (make-invocation "sed" "-i" "s/a/b/" "f") :bsd)))
+    (is (equal '("-i" "" "s/a/b/" "f") (invocation-arguments (rewrite-invocation bsd)))))
+  ;; GNU passes through untouched
+  (let ((gnu (%force-dialect (make-invocation "sed" "-i" "s/a/b/" "f") :gnu)))
+    (is (eq gnu (rewrite-invocation gnu)))))
+
+(test date-translates-epoch-flag-on-bsd
+  (let ((bsd (%force-dialect (make-invocation "date" "-u" "-d" "@1000000000" "+%Y") :bsd)))
+    (is (equal '("-u" "-r" "1000000000" "+%Y")
+               (invocation-arguments (rewrite-invocation bsd)))))
+  ;; attached forms
+  (let ((bsd (%force-dialect (make-invocation "date" "--date=@42") :bsd)))
+    (is (equal '("-r" "42") (invocation-arguments (rewrite-invocation bsd)))))
+  ;; a non-epoch -d is left as-is (no portable BSD form)
+  (let ((bsd (%force-dialect (make-invocation "date" "-d" "next friday") :bsd)))
+    (is (eq bsd (rewrite-invocation bsd))))
+  ;; GNU passes through
+  (let ((gnu (%force-dialect (make-invocation "date" "-d" "@1000000000") :gnu)))
+    (is (eq gnu (rewrite-invocation gnu)))))
+
+(test date-real-epoch-formats-the-same-on-both-dialects
+  "End-to-end: `date -u -d @1000000000 +%Y` prints 2001 whether the host date is
+GNU (native) or BSD (translated to -r)."
+  (let ((out (pipeline-collect
+              (make-pipeline (list (external "date" "-u" "-d" "@1000000000" "+%Y"))))))
+    (is (equal '("2001") out))))

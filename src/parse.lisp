@@ -241,6 +241,21 @@ exit codes into subtypes carrying parsed detail (SPEC.md §2 rsync example)."))
               do (unless first (terpri out))
                  (write-string line out)))))
 
+(defun split-whitespace (string)
+  "Split STRING on runs of spaces/tabs, dropping empty fields.  Used by wrappers
+whose output is whitespace-columned (df, wc, ...)."
+  (let ((fields '()) (start nil) (len (length string)))
+    (dotimes (i len)
+      (let ((ws (member (char string i) '(#\Space #\Tab))))
+        (cond (ws (when start (push (subseq string start i) fields) (setf start nil)))
+              ((null start) (setf start i)))))
+    (when start (push (subseq string start) fields))
+    (nreverse fields)))
+
+(defun join-with-space (strings)
+  "Join STRINGS with single spaces."
+  (format nil "~{~A~^ ~}" strings))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Protocol generics + default methods
 ;;; ---------------------------------------------------------------------------
