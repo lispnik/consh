@@ -378,6 +378,55 @@ call; everything else desugars to a pipeline run."
 (define-builtin "fg" (lambda (args) (fg (%job-spec->job (first args)))))
 (define-builtin "bg" (lambda (args) (bg (%job-spec->job (first args)))))
 
+(defun %require-job (spec)
+  (or (%job-spec->job spec)
+      (error 'shell-parse-error :line (format nil "no such job: ~A" (or spec "")))))
+
+(defun %job-ref-p (s) (and (stringp s) (plusp (length s)) (char= (char s 0) #\%)))
+
+(defparameter +signal-names+
+  `(("TERM" . ,+sigterm+) ("KILL" . ,+sigkill+) ("INT" . ,+sigint+) ("HUP" . 1)
+    ("STOP" . ,+sigstop+) ("CONT" . ,+sigcont+) ("TSTP" . ,+sigtstp+)
+    ("QUIT" . 3) ("USR1" . ,(if (member :darwin *features*) 30 10)))
+  "Signal name -> number for the kill builtin.")
+
+(defun %parse-signal (spec)
+  "SPEC is a signal name or number without the leading dash: \"9\", \"KILL\",
+\"SIGKILL\"."
+  (let ((s (string-upcase spec)))
+    (when (and (>= (length s) 3) (string= (subseq s 0 3) "SIG")) (setf s (subseq s 3)))
+    (or (parse-integer s :junk-allowed t)
+        (cdr (assoc s +signal-names+ :test #'string=))
+        (error 'shell-parse-error :line (format nil "kill: unknown signal: ~A" spec)))))
+
+(defun %parse-kill-args (args)
+  "Split ARGS into (values SIGNAL TARGETS): a leading -SIG (name or number) sets
+the signal, defaulting to SIGTERM."
+  (if (and args (> (length (first args)) 1) (char= (char (first args) 0) #\-))
+      (values (%parse-signal (subseq (first args) 1)) (rest args))
+      (values +sigterm+ args)))
+
+(define-builtin "kill"
+  ;; kill [-SIGNAL] (%job | pid)...  A %job is terminated through the job (its
+  ;; whole process group + threads reclaimed); a bare pid is signalled directly.
+  (lambda (args)
+    (multiple-value-bind (signal targets) (%parse-kill-args args)
+      (declare (ignorable signal))
+      (unless targets (error 'shell-parse-error :line "kill: no target"))
+      (dolist (target targets)
+        (if (%job-ref-p target)
+            (kill-job (%require-job target))
+            (c-kill (parse-integer target) signal)))
+      (values))))
+
+(define-builtin "wait"
+  ;; wait [%job] — wait for one job (returning its output) or, with no argument,
+  ;; every job.
+  (lambda (args)
+    (if args
+        (wait-job (%require-job (first args)))
+        (progn (dolist (j (all-jobs)) (ignore-errors (wait-job j))) (values)))))
+
 (define-builtin "history"
   (lambda (args) (declare (ignore args))
     (loop for i below (history-count) collect (cons i (history-form i)))))

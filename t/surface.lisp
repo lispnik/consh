@@ -303,6 +303,34 @@ name the shell's own vocabulary unqualified — pipe, pipeline-collect, external
     (is (member job (shell-eval "jobs")))
     (is (equal '("z") (shell-eval (format nil "fg %~D" (job-id job)))))))
 
+(test wait-builtin-returns-job-output
+  (let ((job (run-job (make-pipeline (list (external "sh" "-c" "printf 'q\\n'"))) :background t)))
+    (is (equal '("q") (shell-eval (format nil "wait %~D" (job-id job)))))))
+
+(test kill-builtin-terminates-a-job
+  (let ((job (run-job (make-pipeline (list (external "sleep" "30"))) :background t)))
+    (is (member job (shell-eval "jobs")))
+    (shell-eval (format nil "kill %~D" (job-id job)))
+    (is (eq :done (job-state job)))
+    (is-true (job-complete-p job))))
+
+(test kill-parses-signal-names-and-numbers
+  (is (= consh::+sigkill+ (consh::%parse-signal "9")))
+  (is (= consh::+sigkill+ (consh::%parse-signal "KILL")))
+  (is (= consh::+sigkill+ (consh::%parse-signal "SIGKILL")))
+  (is (= consh::+sigterm+ (consh::%parse-signal "term")))
+  ;; a leading -SIG sets the signal; default is SIGTERM
+  (multiple-value-bind (sig targets) (consh::%parse-kill-args '("-9" "%1"))
+    (is (= consh::+sigkill+ sig))
+    (is (equal '("%1") targets)))
+  (multiple-value-bind (sig targets) (consh::%parse-kill-args '("%2"))
+    (is (= consh::+sigterm+ sig))
+    (is (equal '("%2") targets))))
+
+(test kill-unknown-signal-and-missing-target-error
+  (signals shell-parse-error (consh::%parse-signal "BOGUS"))
+  (signals shell-parse-error (%builtin "kill" '())))
+
 (test builtins-only-dispatch-single-stage-foreground
   ;; `cd` inside a pipeline is NOT a builtin — it desugars to an external stage
   (is (equal '(%shell-run (list (external "cd" "x") (external "cat")) :background nil)

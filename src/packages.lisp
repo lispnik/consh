@@ -121,6 +121,9 @@
    #:lisp-stage #:lisp-stage-p #:stage-xform #:stage-expensive-p #:stage-parallel-p
    #:stage-generator #:generator-stage-p
    #:external #:map-stage #:filter-stage #:mapcat-stage #:emit-stage #:generator-stage
+   #:collector-stage #:stage-collector
+   ;; native, in-image stage replacements for external filters
+   #:grep-stage #:cat-stage #:sort-stage #:uniq-stage
    #:pipeline #:make-pipeline #:pipeline-stages #:pipe
    ;; plumbing analysis
    #:pipeline-groups #:pipeline-plan #:compose-xforms

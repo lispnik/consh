@@ -652,3 +652,102 @@ state (a running total) — which map/filter/mapcat cannot express."
                             (list (generator-stage
                                    (lambda (emit) (loop for i from 0 do (funcall emit i)))))))))
     (is (equal '(0 1 2 3 4) (take 5 seq)))))
+
+;;; ===========================================================================
+;;; Native in-image stages: grep / cat / sort / uniq (no subprocess)
+;;; ===========================================================================
+
+(defun %ints (&rest xs) (lambda (emit) (dolist (x xs) (funcall emit x))))
+
+(test native-grep-filters-in-image
+  (is (equal '("foo" "foobar")
+             (pipeline-collect
+              (make-pipeline (list (generator-stage (%ints "foo" "bar" "foobar"))
+                                   (grep-stage "foo"))))))
+  ;; invert keeps the non-matches
+  (is (equal '("bar")
+             (pipeline-collect
+              (make-pipeline (list (generator-stage (%ints "foo" "bar" "foobar"))
+                                   (grep-stage "foo" :invert t)))))))
+
+(test native-grep-matches-objects-via-key
+  ;; grep an object stream by a projected slot
+  (let ((a (make-instance 'grep-match :file "a.txt" :line-number 1 :text "hello"))
+        (b (make-instance 'grep-match :file "b.txt" :line-number 2 :text "world")))
+    (is (equal (list a)
+               (pipeline-collect
+                (make-pipeline (list (generator-stage (%ints a b))
+                                     (grep-stage "hello" :key #'grep-match-text))))))))
+
+(test native-grep-matches-external-grep
+  "The native grep-stage yields the same lines as the external grep wrapper."
+  (let* ((lines '("apple" "banana" "grape" "grapefruit"))
+         (native (pipeline-collect
+                  (make-pipeline (list (generator-stage (lambda (e) (mapc e lines)))
+                                       (grep-stage "grape")))))
+         (external (mapcar #'grep-match-text
+                           (pipeline-collect
+                            (run-pipeline (make-pipeline (list (external "grep" "grape")))
+                                          :input lines)))))
+    (is (equal '("grape" "grapefruit") native))
+    (is (equal external native))))
+
+(test native-cat-reads-files-as-string-objects
+  (let ((dir (make-temp-dir)))
+    (with-open-file (s (merge-pathnames "a.txt" dir) :direction :output)
+      (write-line "one" s) (write-line "two" s))
+    (with-open-file (s (merge-pathnames "b.txt" dir) :direction :output)
+      (write-line "three" s))
+    (let ((*current-directory* dir))
+      (is (equal '("one" "two" "three")
+                 (pipeline-collect (make-pipeline (list (cat-stage "a.txt" "b.txt")))))))))
+
+(test native-sort-orders-the-whole-stream
+  (is (equal '("apple" "banana" "cherry")
+             (pipeline-collect
+              (make-pipeline (list (generator-stage (%ints "cherry" "apple" "banana"))
+                                   (sort-stage))))))
+  ;; numeric, not lexical
+  (is (equal '(2 10 100)
+             (pipeline-collect
+              (make-pipeline (list (generator-stage (%ints 100 2 10)) (sort-stage)))))))
+
+(test native-sort-is-object-aware-by-key
+  "Sort file objects by a numeric slot, not by their printed text."
+  (let ((big   (make-instance 'file-info :name "big"   :path #p"big"
+                              :size 4096 :mtime 0 :mode nil :uid nil :gid nil :owner "u"))
+        (small (make-instance 'file-info :name "small" :path #p"small"
+                              :size 12 :mtime 0 :mode nil :uid nil :gid nil :owner "u")))
+    (is (equal (list small big)
+               (pipeline-collect
+                (make-pipeline (list (generator-stage (%ints big small))
+                                     (sort-stage :key #'file-size))))))))
+
+(test native-uniq-drops-adjacent-duplicates
+  (is (equal '(1 2 3 1)
+             (pipeline-collect
+              (make-pipeline (list (generator-stage (%ints 1 1 2 2 2 3 1))
+                                   (uniq-stage))))))
+  ;; sort then uniq = full dedup
+  (is (equal '(1 2 3)
+             (pipeline-collect
+              (make-pipeline (list (generator-stage (%ints 3 1 2 1 3 2))
+                                   (sort-stage) (uniq-stage)))))))
+
+(test native-stages-via-pipe-macro-and-current-directory
+  (let ((dir (make-temp-dir)))
+    (with-open-file (s (merge-pathnames "log.txt" dir) :direction :output)
+      (write-line "warn: a" s) (write-line "info: b" s) (write-line "warn: a" s))
+    (let ((*current-directory* dir))
+      ;; :cat | :grep | :sort | :uniq, all native, through the pipe macro
+      (is (equal '("warn: a")
+                 (pipeline-collect
+                  (pipe (:cat "log.txt") (:grep "warn") (:sort) (:uniq))))))))
+
+(test native-sort-stage-is-a-standalone-lisp-group
+  "A collector (sort) is a barrier: it forms its own non-fusible lisp group."
+  (let ((groups (pipeline-groups (pipe (:generate (emit) (funcall emit 1))
+                                       (:sort) (:uniq)))))
+    ;; generator+uniq fuse; sort stands alone between them -> 3 groups
+    (is (= 3 (length groups)))
+    (is (every (lambda (g) (eq (car g) :lisp)) groups))))

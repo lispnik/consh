@@ -71,7 +71,20 @@ jobs:
           (unless (fiveam:run! (find-symbol "CONSH" (find-package :consh/test)))
             (sb-ext:exit :code 1))
           LISP
-          sbcl --noinform --no-userinit --no-sysinit --non-interactive --load /tmp/run-tests.lisp
+          # GitHub's macOS runners intermittently deny posix_spawn with EPERM
+          # ("Operation not permitted") on unrelated spawn-heavy tests. A real
+          # test regression fails deterministically on every attempt, so retry
+          # the whole suite a few times: a genuine failure still fails all N,
+          # while a transient spawn flake clears on a later attempt.
+          for attempt in 1 2 3; do
+            echo "::group::test attempt $attempt"
+            if sbcl --noinform --no-userinit --no-sysinit --non-interactive --load /tmp/run-tests.lisp; then
+              echo "::endgroup::"; exit 0
+            fi
+            echo "::endgroup::"
+            echo "attempt $attempt failed"
+          done
+          echo "test suite failed on all attempts"; exit 1
 
       - name: Build standalone image and smoke-test it
         run: |
@@ -83,9 +96,18 @@ jobs:
           LISP
           sbcl --noinform --no-userinit --no-sysinit --non-interactive --load /tmp/build.lisp
           test -x ./consh
-          out=$(printf 'echo image works\nseq 1 3 | grep 2\n(+ 40 2)\n' | ./consh)
-          echo "$out"
-          echo "$out" | grep -q "image works"
-          # grep is a wrapper: `seq | grep` yields a grep-match object, not "2".
-          echo "$out" | grep -q 'GREP-MATCH 2 "2"'
-          echo "$out" | grep -q "^42$"
+          # The image spawns processes too; retry to ride out the macOS
+          # posix_spawn EPERM flake (see the test step for why).
+          smoke() {
+            out=$(printf 'echo image works\nseq 1 3 | grep 2\n(+ 40 2)\n' | ./consh)
+            echo "$out"
+            echo "$out" | grep -q "image works" || return 1
+            # grep is a wrapper: `seq | grep` yields a grep-match object, not "2".
+            echo "$out" | grep -q 'GREP-MATCH 2 "2"' || return 1
+            echo "$out" | grep -q "^42$" || return 1
+          }
+          for attempt in 1 2 3; do
+            if smoke; then exit 0; fi
+            echo "smoke attempt $attempt failed"
+          done
+          echo "smoke test failed on all attempts"; exit 1

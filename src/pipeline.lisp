@@ -34,6 +34,10 @@ a generator (source) stage.")
    (generator :initarg :generator :initform nil :reader stage-generator
               :documentation "For a source stage: a function (emit) that emits
 values imperatively, ignoring upstream input.  NIL for transducer stages.")
+   (collector :initarg :collector :initform nil :reader stage-collector
+              :documentation "For a BARRIER stage: a function (list) -> list.  The
+worker collects the whole input into a list, calls it, and emits the results.
+For stages that need the full stream (sort).  NIL otherwise.")
    (expensive :initarg :expensive :initform nil :reader stage-expensive-p)
    (parallel  :initarg :parallel  :initform nil :reader stage-parallel-p))
   (:documentation
@@ -99,6 +103,66 @@ group).  Backpressure still applies — emit is a channel put."
   (make-instance 'lisp-stage :name (or name "generate") :expensive expensive
                  :parallel parallel :generator fn))
 
+(defun collector-stage (fn &key name)
+  "A BARRIER stage: the worker collects the whole input stream into a list, calls
+(FN list), and emits each element of the returned list.  For transforms that
+need every object at once (sorting).  Always a group of its own (non-fusible)."
+  (make-instance 'lisp-stage :name (or name "collect") :expensive t :collector fn))
+
+;;; --- native, in-image replacements for external filters (SPEC §2 endgame) ---
+;;; These are ordinary pipeline stages — no subprocess, no fork — that do what
+;;; grep/cat/sort/uniq do, but over the object stream and in Lisp.
+
+(defun %render-for-match (object)
+  "The string a native grep matches against: strings as-is, else the object's
+printed representation."
+  (if (stringp object) object (princ-to-string object)))
+
+(defun grep-stage (pattern &key (key #'%render-for-match) invert name)
+  "Native grep: keep objects whose KEY projection contains the literal substring
+PATTERN (or, with :INVERT, those that do not).  No subprocess."
+  (filter-stage (lambda (x)
+                  (let ((hit (search pattern (funcall key x))))
+                    (if invert (not hit) hit)))
+                :name (or name "grep*")))
+
+(defun cat-stage (&rest files)
+  "Native cat: a source stage emitting each line (a string) of FILES, resolved
+against *current-directory*.  No subprocess."
+  (generator-stage
+   (lambda (emit)
+     (dolist (f files)
+       (with-open-file (in (merge-pathnames f *current-directory*) :direction :input)
+         (loop for line = (read-line in nil nil) while line do (funcall emit line)))))
+   :name "cat*"))
+
+(defun %generic-lessp (a b)
+  "A total-ish order usable across the common object-stream element types:
+numbers numerically, strings lexically, otherwise by printed representation."
+  (cond ((and (realp a) (realp b)) (< a b))
+        ((and (stringp a) (stringp b)) (string< a b))
+        (t (string< (princ-to-string a) (princ-to-string b)))))
+
+(defun sort-stage (&key (key #'identity) (test #'%generic-lessp) name)
+  "Native, object-aware sort: order the whole stream by (KEY object) under TEST.
+A barrier — it buffers the stream.  `(:sort :key #'file-size)` sorts file objects
+by size numerically, not by their text."
+  (collector-stage (lambda (items) (stable-sort (copy-list items) test :key key))
+                   :name (or name "sort")))
+
+(defun uniq-stage (&key (key #'identity) (test #'equal) name)
+  "Native uniq: drop ADJACENT duplicates (like uniq(1)) comparing (KEY object)
+under TEST (EQUAL by default, so equal strings/numbers collapse).  Streaming —
+state lives in the transducer instance, fresh per run."
+  (make-instance 'lisp-stage :name (or name "uniq")
+                 :xform (lambda (emit)
+                          (let ((first t) (previous nil))
+                            (lambda (x)
+                              (let ((k (funcall key x)))
+                                (when (or first (not (funcall test k previous)))
+                                  (funcall emit x))
+                                (setf first nil previous k)))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Pipeline
 ;;; ---------------------------------------------------------------------------
@@ -135,6 +199,11 @@ group).  Backpressure still applies — emit is a channel put."
          (:mapcat `(mapcat-stage ,(second clause) ,@(cddr clause)))
          (:emit     `(emit-stage      (lambda ,(second clause) ,@(cddr clause))))
          (:generate `(generator-stage (lambda ,(second clause) ,@(cddr clause))))
+         ;; native, in-image filters (no subprocess)
+         (:grep `(grep-stage ,(second clause) ,@(cddr clause)))
+         (:cat  `(cat-stage ,@(rest clause)))
+         (:sort `(sort-stage ,@(rest clause)))
+         (:uniq `(uniq-stage ,@(rest clause)))
          (:external `(external ,@(rest clause)))))
       ((and (consp clause) (symbolp (car clause)))
        `(external ,(string-downcase (symbol-name (car clause))) ,@(rest clause)))

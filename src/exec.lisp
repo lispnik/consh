@@ -276,8 +276,9 @@ applies the composed transducer to each object; a group headed by a GENERATOR
 source runs the generator, feeding its emitted values through the remaining
 fused transducers.  Emits into a fresh channel; returns the output object-seq."
   (let* ((generator (stage-generator (first stages)))
+         (collector (stage-collector (first stages)))
          ;; a generator heads its group; the rest are the fused transducers
-         (xform (compose-xforms (if generator (rest stages) stages)))
+         (xform (unless collector (compose-xforms (if generator (rest stages) stages))))
          (out (make-channel))
          (thread
            (spawn-stage-thread
@@ -286,19 +287,26 @@ fused transducers.  Emits into a fresh channel; returns the output object-seq."
                    (call-with-worker-guard "lisp"
                     (lambda ()
                       (handler-case
-                          (let* ((sink (lambda (o) (channel-put out o)))
-                                 (step (funcall xform sink))
-                                 ;; each emitted object flows through the fused
-                                 ;; transducers, with a skip-object restart so a
-                                 ;; parked worker can drop a bad one (SPEC §5)
-                                 (emit (lambda (x)
-                                         (restart-case (funcall step x)
-                                           (skip-object ()
-                                             :report "Skip this object and continue.")))))
-                            (if generator
-                                (funcall generator emit)
+                          (if collector
+                              ;; BARRIER: collect the whole input, transform, emit.
+                              (let ((items '()))
                                 (when input-seq
-                                  (do-object-seq (x input-seq) (funcall emit x)))))
+                                  (do-object-seq (x input-seq) (push x items)))
+                                (dolist (o (funcall collector (nreverse items)))
+                                  (channel-put out o)))
+                              (let* ((sink (lambda (o) (channel-put out o)))
+                                     (step (funcall xform sink))
+                                     ;; each emitted object flows through the fused
+                                     ;; transducers, with a skip-object restart so a
+                                     ;; parked worker can drop a bad one (SPEC §5)
+                                     (emit (lambda (x)
+                                             (restart-case (funcall step x)
+                                               (skip-object ()
+                                                 :report "Skip this object and continue.")))))
+                                (if generator
+                                    (funcall generator emit)
+                                    (when input-seq
+                                      (do-object-seq (x input-seq) (funcall emit x))))))
                         ;; downstream cancelled: stop and cascade upstream
                         (channel-closed () (when input-seq (seq-close input-seq))))))
                 (close-channel out)))

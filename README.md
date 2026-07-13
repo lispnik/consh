@@ -18,7 +18,7 @@ POSIX-compliant: there is no string `eval`, no word-splitting layer — argument
 are Lisp values and globbing returns pathnames.
 
 Built on SBCL in the phase order of [`SPEC.md`](SPEC.md), each phase ending with
-its FiveAM suite green (**1223 checks**).
+its FiveAM suite green (**1251 checks**).
 
 ```
                  bytes                         objects
@@ -141,7 +141,7 @@ where objects help.
 (pipeline-collect
  (make-pipeline (list (external "sh" "-c" "printf 'foo\\nbar\\nfoobar\\n'")
                       (external "grep" "foo"))))
-=> ("foo" "foobar")
+=> (#<GREP-MATCH 1 "foo"> #<GREP-MATCH 3 "foobar">)   ; grep -n enriches the tail
 
 ;; external -> an in-image Lisp stage (map / filter / mapcat), run in a thread
 (pipeline-collect
@@ -191,6 +191,24 @@ Failures are typed conditions, not exit codes. Under `:on-failure :signal` a
 failing stage raises a `pipeline-failed` naming the stage and carrying its
 parsed stderr; the `restart-stage` restart reruns a corrected pipeline. Wrappers
 translate exit codes: `grep` exiting 1 ("no match") is *not* an error.
+
+**Native, in-image stages** do what `grep`/`cat`/`sort`/`uniq` do with no
+subprocess — over the object stream, so `sort` orders by a *slot*, not by text.
+`:sort` is a barrier (it buffers to reorder); `:grep`/`:uniq` stream; `:cat` is a
+source:
+
+```lisp
+;; biggest files first, then just their names — all in-image, no fork
+(pipeline-collect (pipe (ls) (:sort :key #'file-size) (:map #'file-name)))
+=> ("notes.txt" "README.md" "src" "kernel.img")
+
+;; :cat | :grep | :uniq, native end to end
+(pipeline-collect (pipe (:cat "log.txt") (:grep "warn") (:sort) (:uniq)))
+```
+
+Backgrounding (`&`) makes a **job**; the `jobs`, `fg`, `bg`, `wait`, and `kill`
+builtins drive the job objects (`kill %1` reclaims the whole process group;
+`kill -9 PID` signals a bare pid).
 
 
 ## Processes & object channels
@@ -299,9 +317,9 @@ line, or tears down a running foreground job; **Ctrl-D** exits.
 | `src/reaper.lisp` | 1 | Process objects; the single, **SIGCHLD-driven** `waitpid` reaper thread; `*current-directory*` (no process-wide `chdir`, ever) |
 | `src/channel.lisp` | 2 | Bounded object channels: backpressure, EOF, downstream cancellation, stop-flag parking |
 | `src/invocation.lisp`, `parse.lisp`, `dialect.lisp`, `wrappers/` | 3 | Per-command parser protocol; lazy channel-backed object sequences; `parse-error` restarts; GNU/BSD **dialect probing/translation** (`stat` picks `-c`/`-f`; `sed -i`/`date -d @` rewritten to BSD); `ls`/`find` **stat-enrich** to `file-info`, `grep -n` → `grep-match`, `df` → `filesystem`, `wc` → `wc-count`, `du` → `du-entry`, `git status`, `ps`, `lsblk -J` **JSON** → `block-device` |
-| `src/pipeline.lisp`, `exec.lisp` | 4 | `pipe` macro, plumbing/fusion compiler, pump threads, stderr drainers, `pipeline-result`, cancellation |
+| `src/pipeline.lisp`, `exec.lisp` | 4 | `pipe` macro, plumbing/fusion compiler, pump threads, stderr drainers, `pipeline-result`, cancellation; native in-image `grep`/`cat`/`sort`/`uniq` stages |
 | `src/jobs.lisp` | 5 | Job objects, fg/bg, C-z, job events, `debug-job` cross-thread conditions |
-| `src/surface.lisp` | 6 | Reader sugar, prompt function, history, completion, aliases |
+| `src/surface.lisp` | 6 | Reader sugar, prompt function, history, completion, aliases, job-control builtins (`jobs`/`fg`/`bg`/`wait`/`kill`) |
 | `src/present.lisp` | — | Presentation layer: `table` renders an object stream as an aligned grid via each type's `table-columns` |
 
 Thread discipline (SPEC §5): one reaper for the image, woken by a minimal
