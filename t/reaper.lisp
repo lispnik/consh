@@ -87,24 +87,29 @@ timestamp is not fine-grained enough on fast CI machines).")
 
 (test relative-path-honors-current-directory
   (with-fixture with-reaper ()
+    ;; Use a symlink to an existing binary (/bin/pwd) rather than a freshly
+    ;; written+chmod'd script — the latter can transiently ETXTBSY when exec'd
+    ;; immediately after writing.  We still spawn a RELATIVE program path.
     (let* ((dir (make-temp-dir))
-           (script (merge-pathnames "probe.sh" dir))
-           (marker (merge-pathnames "cwd_marker" dir))
+           (link (merge-pathnames "mypwd" dir))
            (cwd-before (sb-posix:getcwd)))
-      (with-open-file (s script :direction :output :if-exists :supersede)
-        (format s "#!/bin/sh~%/bin/pwd > cwd_marker~%"))
-      (sb-posix:chmod (namestring script) #o755)
-      ;; Spawn by a RELATIVE program path, with the shell cwd set to DIR.
-      (let ((p (launch "./probe.sh" '() :directory dir)))
-        (is-true (wait-process p :timeout 5))
-        (is (eq :exited (process-status p)))
-        (is (= 0 (process-exit-code p))))
-      ;; The relative write landed inside DIR => the child's cwd was DIR.
-      (is-true (probe-file marker))
-      (let ((reported (with-open-file (s marker) (read-line s nil ""))))
-        (is (equal (truename reported) (truename dir))))
-      ;; And the shell process itself never chdir'd.
-      (is (equal cwd-before (sb-posix:getcwd))))))
+      (sb-posix:symlink "/bin/pwd" (namestring link))
+      (multiple-value-bind (r w) (make-pipe)
+        (let ((in (sb-sys:make-fd-stream r :input t :element-type 'character))
+              (p (launch "./mypwd" '() :directory dir       ; relative path, cwd = DIR
+                         :file-actions (list (list :dup2 w 1)))))
+          (c-close w)
+          (unwind-protect
+               (let ((reported (string-trim '(#\Space #\Newline) (or (read-line in nil "") ""))))
+                 (is-true (wait-process p :timeout 5))
+                 (is (eq :exited (process-status p)))
+                 (is (= 0 (process-exit-code p)))
+                 ;; pwd printed DIR => the child's cwd was DIR (relative exec
+                 ;; resolved against *current-directory*)
+                 (is (equal (truename reported) (truename dir)))
+                 ;; and the shell process itself never chdir'd
+                 (is (equal cwd-before (sb-posix:getcwd))))
+            (close in)))))))
 
 ;;; -------------------------------------------------------------------------
 ;;; Exit codes and argument passing
