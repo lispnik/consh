@@ -72,8 +72,13 @@
 (defconstant +eagain+ (if (member :darwin *features*) 35 11))
 
 ;; Bounded retry for transient posix_spawn failures (EAGAIN / spurious EPERM).
-(defparameter +spawn-max-attempts+ 8)
-(defparameter +spawn-retry-seconds+ 0.025)
+;; GitHub's macOS runners can deny spawns in bursts lasting well over a second,
+;; so the window is generous (escalating backoff, capped) — a genuine error uses
+;; a non-retried errno (ENOENT, ...) and still fails fast.
+(defparameter +spawn-max-attempts+ 20)
+(defun %spawn-retry-backoff (attempt)
+  "Seconds to wait before spawn retry ATTEMPT — escalating, capped at 150ms."
+  (min 0.15 (* 0.01 attempt)))
 
 (defun errno-name (errno)
   "Best-effort symbolic name for ERRNO via strerror."
@@ -453,7 +458,7 @@ including argv[0]).  Returns the child pid.
                                               (not (or (= result +eagain+) (= result +eperm+)))
                                               (>= tries +spawn-max-attempts+))
                                        return result
-                                     do (sleep +spawn-retry-seconds+))))
+                                     do (sleep (%spawn-retry-backoff tries)))))
                        (unless (= rc 0)
                          (error 'spawn-error :program program :syscall fn-name :errno rc))
                        (cffi:mem-ref pid-out :int))))))))
