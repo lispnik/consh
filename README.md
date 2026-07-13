@@ -281,16 +281,18 @@ line, or tears down a running foreground job; **Ctrl-D** exits.
 | File | Phase | What it does |
 |---|---|---|
 | `src/ffi.lisp` | 1 | CFFI: `pipe`, `posix_spawn` (+ file actions incl. per-child `chdir`), `waitpid`, `kill`/`killpg`, `stat`, `getpwuid` |
-| `src/reaper.lisp` | 1 | Process objects; the single `waitpid` reaper thread; `*current-directory*` (no process-wide `chdir`, ever) |
+| `src/reaper.lisp` | 1 | Process objects; the single, **SIGCHLD-driven** `waitpid` reaper thread; `*current-directory*` (no process-wide `chdir`, ever) |
 | `src/channel.lisp` | 2 | Bounded object channels: backpressure, EOF, downstream cancellation, stop-flag parking |
 | `src/invocation.lisp`, `parse.lisp`, `dialect.lisp`, `wrappers/` | 3 | Per-command parser protocol; lazy channel-backed object sequences; `parse-error` restarts; GNU/BSD **dialect probing** (`stat` picks `-c` vs `-f`); `ls`/`find`/`cat`/`grep`/`stat` |
 | `src/pipeline.lisp`, `exec.lisp` | 4 | `pipe` macro, plumbing/fusion compiler, pump threads, stderr drainers, `pipeline-result`, cancellation |
 | `src/jobs.lisp` | 5 | Job objects, fg/bg, C-z, job events, `debug-job` cross-thread conditions |
 | `src/surface.lisp` | 6 | Reader sugar, prompt function, history, completion, aliases |
 
-Thread discipline (SPEC §5): one reaper for the image; one pump thread per
-parse/unparse boundary; one stderr drainer per external; one worker per unfused
-Lisp stage. Cancellation flows through objects (closed channels, EOF) and
+Thread discipline (SPEC §5): one reaper for the image, woken by a minimal
+SIGCHLD handler (which only signals a semaphore — all `waitpid` work runs in the
+reaper thread, so children are reaped in well under a millisecond); one pump
+thread per parse/unparse boundary; one stderr drainer per external; one worker
+per unfused Lisp stage. Cancellation flows through objects (closed channels, EOF) and
 `killpg` — never `terminate-thread`. Every pipe end is close-on-exec and the
 parent closes its child-side copies immediately. `stat`/`fcntl` go through
 `sb-posix` for ABI correctness (a naive CFFI `fcntl` corrupts args on Darwin

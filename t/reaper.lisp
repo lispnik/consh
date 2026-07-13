@@ -82,6 +82,26 @@ timestamp is not fine-grained enough on fast CI machines).")
         (is (= +echild+ errno))))))
 
 ;;; -------------------------------------------------------------------------
+;;; the reaper is SIGCHLD-driven, not polling
+;;; -------------------------------------------------------------------------
+
+(test reaping-is-sigchld-driven
+  "With the backstop timeout set absurdly high, a child that exits AFTER the
+spawn-nudge is still reaped promptly — so it is SIGCHLD waking the reaper, not
+the timeout (which would make wait-process time out)."
+  (stop-reaper)
+  (let ((consh::*reaper-backstop-seconds* 60.0))     ; would-be poll interval: 60s
+    (ensure-reaper)
+    (is-true consh::*sigchld-installed*)              ; the handler is installed
+    (unwind-protect
+         (let ((p (launch "sleep" '("0.2"))))         ; exits ~200ms after the spawn nudge
+           ;; reaped within 3s => SIGCHLD did it; the 60s backstop cannot have.
+           (is-true (wait-process p :timeout 3))
+           (is (eq :exited (process-status p))))
+      (stop-reaper)))
+  (ensure-reaper))
+
+;;; -------------------------------------------------------------------------
 ;;; relative-path spawn honors *current-directory*, no process-wide chdir
 ;;; -------------------------------------------------------------------------
 

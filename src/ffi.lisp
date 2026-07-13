@@ -85,6 +85,7 @@
 (defconstant +sigcont+ (if (member :darwin *features*) 19 18))
 (defconstant +sigstop+ (if (member :darwin *features*) 17 19))
 (defconstant +sigtstp+ (if (member :darwin *features*) 18 20))
+(defconstant +sigchld+ (if (member :darwin *features*) 20 17))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Small helpers

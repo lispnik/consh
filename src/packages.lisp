@@ -24,7 +24,7 @@
    ;; signalling / groups
    #:c-kill #:c-killpg #:c-setpgid #:c-getpgid #:c-tcsetpgrp
    ;; signal numbers commonly used
-   #:+sigterm+ #:+sigkill+ #:+sigcont+ #:+sigstop+ #:+sigtstp+ #:+sigint+))
+   #:+sigterm+ #:+sigkill+ #:+sigcont+ #:+sigstop+ #:+sigtstp+ #:+sigint+ #:+sigchld+))
 
 (defpackage #:consh
   (:use #:cl #:consh.ffi)

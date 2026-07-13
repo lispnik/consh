@@ -107,24 +107,45 @@ until it changes."))
     (sb-thread:condition-broadcast (%process-cvar process))))
 
 ;;; ---------------------------------------------------------------------------
-;;; The reaper thread
+;;; The reaper thread (SIGCHLD-driven)
 ;;; ---------------------------------------------------------------------------
+;;;
+;;; The reaper parks on a semaphore.  A minimal SIGCHLD handler — installed via
+;;; SBCL's deferred-interrupt mechanism, so it runs at a safe point, not raw
+;;; signal context — does nothing but SIGNAL-SEMAPHORE; all the real work
+;;; (waitpid, updating process objects) happens in the reaper thread (SPEC §5:
+;;; "No Lisp in signal handlers").  A semaphore, not a condvar, so a SIGCHLD that
+;;; races the reaper between drains is never lost — the count persists.  The long
+;;; wait timeout is only a backstop in case a wakeup is ever missed; it does NOT
+;;; busy-poll.
 
 (defvar *reaper-thread* nil)
-(defvar *reaper-lock* (sb-thread:make-mutex :name "reaper"))
-(defvar *reaper-cvar* (sb-thread:make-waitqueue :name "reaper-wakeup"))
+(defvar *reaper-lock* (sb-thread:make-mutex :name "reaper"))     ; guards thread lifecycle
+(defvar *reaper-sem* (sb-thread:make-semaphore :name "reaper-wakeup"))
 (defvar *reaper-stop* nil)
-(defparameter *reaper-poll-seconds* 0.05
-  "Fallback wakeup interval.  A newly spawned process nudges the reaper, so this
-only bounds latency for children that exit before the reaper next parks.")
+(defvar *sigchld-installed* nil)
+(defparameter *reaper-backstop-seconds* 1.0
+  "Safety wakeup interval.  SIGCHLD normally wakes the reaper immediately; this
+only bounds latency if a wakeup were ever missed.")
 
 (defun reaper-running-p ()
   (and *reaper-thread* (sb-thread:thread-alive-p *reaper-thread*)))
 
 (defun notify-reaper ()
   "Wake the reaper so it drains any ready children promptly."
-  (sb-thread:with-mutex (*reaper-lock*)
-    (sb-thread:condition-notify *reaper-cvar*)))
+  (sb-thread:signal-semaphore *reaper-sem*))
+
+(defun %sigchld-handler (signal info context)
+  "Minimal SIGCHLD handler: just wake the reaper.  No waitpid, no allocation."
+  (declare (ignore signal info context))
+  (sb-thread:signal-semaphore *reaper-sem*))
+
+(defun %install-sigchld-handler ()
+  "Route SIGCHLD to the reaper's wakeup semaphore (idempotent).  Done at reaper
+start (runtime), so a dumped image installs it on first launch."
+  (unless *sigchld-installed*
+    (sb-sys:enable-interrupt +sigchld+ #'%sigchld-handler)
+    (setf *sigchld-installed* t)))
 
 (defun %drain-ready-children ()
   "Reap every child currently ready, updating process objects.  Returns the
@@ -155,15 +176,15 @@ number reaped.  Never blocks (WNOHANG)."
 (defun %reaper-loop ()
   (loop
     (%drain-ready-children)
-    (sb-thread:with-mutex (*reaper-lock*)
-      (when *reaper-stop* (return))
-      ;; Park until nudged or the poll interval elapses, then loop and drain.
-      (sb-thread:condition-wait *reaper-cvar* *reaper-lock*
-                                :timeout *reaper-poll-seconds*))))
+    (when *reaper-stop* (return))
+    ;; Park until SIGCHLD (or a spawn) signals the semaphore, or the backstop
+    ;; timeout elapses; then loop and drain.
+    (sb-thread:wait-on-semaphore *reaper-sem* :timeout *reaper-backstop-seconds*)))
 
 (defun start-reaper ()
   "Start the reaper thread if it is not already running.  Returns the thread."
   (sb-thread:with-mutex (*reaper-lock*)
+    (%install-sigchld-handler)
     (unless (and *reaper-thread* (sb-thread:thread-alive-p *reaper-thread*))
       (setf *reaper-stop* nil
             *reaper-thread*
@@ -179,9 +200,8 @@ number reaped.  Never blocks (WNOHANG)."
   "Ask the reaper to stop after its next drain and join it."
   (let ((thread *reaper-thread*))
     (when (and thread (sb-thread:thread-alive-p thread))
-      (sb-thread:with-mutex (*reaper-lock*)
-        (setf *reaper-stop* t)
-        (sb-thread:condition-notify *reaper-cvar*))
+      (setf *reaper-stop* t)
+      (sb-thread:signal-semaphore *reaper-sem*)          ; wake it to notice the stop
       (sb-thread:join-thread thread :default nil))
     (setf *reaper-thread* nil)
     t))
