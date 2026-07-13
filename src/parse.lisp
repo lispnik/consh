@@ -200,8 +200,12 @@ recovery restarts around it.  If THUNK signals PARSE-ERROR, a handler may invoke
       :report (lambda (s) (format s "Yield the raw text ~S as a string." raw))
       raw)
     (try-dialect (&optional dialect)
-      :report "Retry parsing this record under a different dialect."
-      (declare (ignore dialect))
+      :report "Retry parsing this record under a different command dialect."
+      ;; switch the invocation's dialect (to DIALECT, or the next candidate) and
+      ;; re-run the parse — the thunk reads (command-dialect command)
+      (when command
+        (setf (invocation-dialect command)
+              (or dialect (next-dialect (invocation-dialect command)))))
       (funcall thunk))
     (define-parser (parser)
       :report "Parse this record with a supplied function of the raw text."

@@ -80,8 +80,18 @@ wrapper class if one exists (else the generic COMMAND-INVOCATION)."
 (defgeneric command-dialect (command)
   (:documentation
    "The command's output dialect (:gnu / :bsd / version keyword / :unknown),
-cached on the invocation.  Wrappers whose parsing differs by dialect override
-this to probe (e.g. run `cmd --version`).  The scaffold simply returns the
-cached slot.")
+cached on the invocation.  The default returns the cached slot; wrappers whose
+parsing differs by dialect override this to probe (see ENSURE-DIALECT and the
+stat wrapper).")
   (:method ((command command-invocation))
     (invocation-dialect command)))
+
+(defparameter *dialects* '(:gnu :bsd)
+  "The dialects the TRY-DIALECT restart cycles through.")
+
+(defun next-dialect (current)
+  "The dialect to try after CURRENT (cyclic); the first one from :unknown."
+  (let ((pos (position current *dialects*)))
+    (if pos
+        (nth (mod (1+ pos) (length *dialects*)) *dialects*)
+        (first *dialects*))))

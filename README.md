@@ -283,7 +283,7 @@ line, or tears down a running foreground job; **Ctrl-D** exits.
 | `src/ffi.lisp` | 1 | CFFI: `pipe`, `posix_spawn` (+ file actions incl. per-child `chdir`), `waitpid`, `kill`/`killpg`, `stat`, `getpwuid` |
 | `src/reaper.lisp` | 1 | Process objects; the single `waitpid` reaper thread; `*current-directory*` (no process-wide `chdir`, ever) |
 | `src/channel.lisp` | 2 | Bounded object channels: backpressure, EOF, downstream cancellation, stop-flag parking |
-| `src/invocation.lisp`, `parse.lisp`, `wrappers/` | 3 | Per-command parser protocol; lazy channel-backed object sequences; `parse-error` restarts; `ls`/`find`/`cat`/`grep` |
+| `src/invocation.lisp`, `parse.lisp`, `dialect.lisp`, `wrappers/` | 3 | Per-command parser protocol; lazy channel-backed object sequences; `parse-error` restarts; GNU/BSD **dialect probing** (`stat` picks `-c` vs `-f`); `ls`/`find`/`cat`/`grep`/`stat` |
 | `src/pipeline.lisp`, `exec.lisp` | 4 | `pipe` macro, plumbing/fusion compiler, pump threads, stderr drainers, `pipeline-result`, cancellation |
 | `src/jobs.lisp` | 5 | Job objects, fg/bg, C-z, job events, `debug-job` cross-thread conditions |
 | `src/surface.lisp` | 6 | Reader sugar, prompt function, history, completion, aliases |

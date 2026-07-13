@@ -75,6 +75,9 @@
    ;; protocol generics
    #:parse-output #:parse-error-output #:unparse-input #:command-dialect
    #:rewrite-invocation
+   ;; command-dialect probing
+   #:probe-dialect #:ensure-dialect #:next-dialect #:reset-dialect-cache
+   #:*dialects* #:*dialect-cache*
    ;; parse-error condition + restarts
    #:parse-error #:parse-error-command #:parse-error-raw #:parse-error-cause
    #:parse-record #:signal-parse-error
@@ -86,9 +89,9 @@
    #:ls-invocation #:ls-long-p #:ls-paths #:ls-directory
    #:file-info #:file-name #:file-path #:file-size #:file-mtime #:file-mode
    #:file-uid #:file-gid #:file-owner #:enrich-file
-   ;; wrappers: find / cat / grep
+   ;; wrappers: find / cat / grep / stat
    #:find-invocation #:find-print0-p #:find-start
-   #:cat-invocation #:grep-invocation
+   #:cat-invocation #:grep-invocation #:stat-invocation
    ;; ---- Phase 4: pipeline compiler + executor ----
    #:runnable-seq
    ;; stage + pipeline objects
