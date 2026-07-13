@@ -89,9 +89,14 @@
    #:ls-invocation #:ls-long-p #:ls-paths #:ls-directory
    #:file-info #:file-name #:file-path #:file-size #:file-mtime #:file-mode
    #:file-uid #:file-gid #:file-owner #:enrich-file
-   ;; wrappers: find / cat / grep / stat
+   ;; wrappers: find / cat / grep / stat / git
    #:find-invocation #:find-print0-p #:find-start
    #:cat-invocation #:grep-invocation #:stat-invocation
+   #:git-invocation #:git-subcommand
+   #:git-status #:git-status-code #:git-status-path #:git-status-orig-path
+   #:git-status-index-char #:git-status-worktree-char
+   #:git-status-untracked-p #:git-status-ignored-p
+   #:git-status-staged-p #:git-status-unstaged-p
    ;; ---- Phase 4: pipeline compiler + executor ----
    #:runnable-seq
    ;; stage + pipeline objects

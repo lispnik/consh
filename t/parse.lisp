@@ -563,3 +563,73 @@ not the process working directory (consh never chdir's)."
          (rw (rewrite-invocation inv)))
     (is (equal '("/tmp" "-type" "f" "-print0") (invocation-arguments rw)))
     (is (string= "/tmp" (find-start rw)))))
+
+;;; ===========================================================================
+;;; git status --porcelain wrapper
+;;; ===========================================================================
+
+(defun %porcelain-stream (&rest lines)
+  (make-string-input-stream
+   (with-output-to-string (s) (dolist (l lines) (write-line l s)))))
+
+(test git-parses-porcelain-into-status-objects
+  (let* ((inv (make-invocation "git" "status"))
+         (objs (seq-collect
+                (parse-output inv (%porcelain-stream " M src/foo.lisp"
+                                                     "?? new file.txt"
+                                                     "A  staged.txt"
+                                                     "R  old.txt -> new.txt")))))
+    (is (= 4 (length objs)))
+    (is (every (lambda (o) (typep o 'git-status)) objs))
+    (destructuring-bind (modified untracked staged renamed) objs
+      (is (string= " M" (git-status-code modified)))
+      (is (string= "src/foo.lisp" (git-status-path modified)))
+      (is (git-status-unstaged-p modified))
+      (is (not (git-status-staged-p modified)))
+      (is (git-status-untracked-p untracked))
+      (is (string= "new file.txt" (git-status-path untracked)))   ; path may hold spaces
+      (is (git-status-staged-p staged))
+      (is (string= "new.txt" (git-status-path renamed)))
+      (is (string= "old.txt" (git-status-orig-path renamed))))))
+
+(test git-status-readers
+  (let ((s (first (seq-collect (parse-output (make-invocation "git" "status")
+                                             (%porcelain-stream "MM a.txt"))))))
+    (is (char= #\M (git-status-index-char s)))       ; staged M
+    (is (char= #\M (git-status-worktree-char s)))     ; and worktree M
+    (is (git-status-staged-p s))
+    (is (git-status-unstaged-p s))
+    (is (not (git-status-untracked-p s)))))
+
+(test git-malformed-status-line-signals
+  (signals parse-error (consh::%parse-git-status-line (make-invocation "git" "status") "x")))
+
+(test git-rewrite-adds-porcelain-only-for-status
+  (is (equal '("status" "--porcelain")
+             (invocation-arguments (rewrite-invocation (make-invocation "git" "status")))))
+  ;; idempotent
+  (is (equal '("status" "--porcelain")
+             (invocation-arguments (rewrite-invocation (make-invocation "git" "status" "--porcelain")))))
+  ;; other subcommands untouched
+  (let ((inv (make-invocation "git" "log")))
+    (is (eq inv (rewrite-invocation inv)))))
+
+(test git-non-status-subcommand-yields-lines
+  (let ((inv (make-invocation "git" "log")))
+    (is (equal '("commit abc" "Author: x")
+               (seq-collect (parse-output inv (%porcelain-stream "commit abc" "Author: x")))))))
+
+(test git-status-real-repo-end-to-end
+  "Init a real repo, add an untracked file, and let the wrapper rewrite to
+--porcelain, run git, and parse the result."
+  (let ((dir (make-temp-dir)))
+    (let ((*current-directory* dir))
+      (pipeline-collect (make-pipeline (list (external "git" "init" "-q"))))
+      (with-open-file (s (merge-pathnames "hello.txt" dir) :direction :output)
+        (write-string "x" s))
+      (let* ((entries (pipeline-collect (make-pipeline (list (external "git" "status")))))
+             (e (find "hello.txt" entries
+                      :key (lambda (x) (and (typep x 'git-status) (git-status-path x)))
+                      :test #'equal)))
+        (is (typep e 'git-status))
+        (is (git-status-untracked-p e))))))
