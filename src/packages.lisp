@@ -21,10 +21,12 @@
    ;; wait
    #:c-waitpid #:decode-wait-status
    #:+wnohang+ #:+wuntraced+
-   ;; signalling / groups
-   #:c-kill #:c-killpg #:c-setpgid #:c-getpgid #:c-tcsetpgrp
+   ;; signalling / groups / terminal
+   #:c-kill #:c-killpg #:c-setpgid #:c-getpgid
+   #:c-tcsetpgrp #:c-tcgetpgrp #:c-isatty #:with-signal-ignored
    ;; signal numbers commonly used
-   #:+sigterm+ #:+sigkill+ #:+sigcont+ #:+sigstop+ #:+sigtstp+ #:+sigint+ #:+sigchld+))
+   #:+sigterm+ #:+sigkill+ #:+sigcont+ #:+sigstop+ #:+sigtstp+ #:+sigint+ #:+sigchld+
+   #:+sigttin+ #:+sigttou+))
 
 (defpackage #:consh
   (:use #:cl #:consh.ffi)
@@ -145,6 +147,10 @@
    #:job-events #:job-parked #:job-restarts
    #:run-job #:wait-job #:find-job #:all-jobs #:register-job
    #:fg #:bg #:stop-job #:continue-job #:kill-job
+   ;; controlling terminal / real job control
+   #:*terminal-fd* #:*shell-pgid* #:terminal-job-control-active-p
+   #:enable-terminal-job-control #:disable-terminal-job-control
+   #:give-terminal-to-job #:reclaim-terminal
    #:debug-job #:resume-job #:take-job-events
    #:skip-object
    ;; ---- Phase 6: surface syntax ----

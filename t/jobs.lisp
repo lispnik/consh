@@ -318,3 +318,36 @@ counts the rest as dropped — bounded memory, no OOM."
     (is (<= (length (job-output-list j)) 16))
     (is (> (job-output-dropped j) 0))
     (is (every (lambda (x) (equal x "y")) (job-output-list j)))))
+
+;;; ===========================================================================
+;;; Controlling terminal / real job control
+;;; ===========================================================================
+
+(test terminal-job-control-inactive-by-default
+  (let ((*terminal-fd* nil) (*shell-pgid* nil))
+    (is-false (terminal-job-control-active-p))))
+
+(test enable-terminal-job-control-is-a-noop-on-a-non-tty
+  "A pipe fd is not a terminal, so enabling job control on it does nothing and
+leaves the shell in non-interactive mode."
+  (multiple-value-bind (r w) (make-pipe)
+    (unwind-protect
+         (let ((*terminal-fd* nil) (*shell-pgid* nil))
+           (is (null (enable-terminal-job-control r)))
+           (is (null *terminal-fd*))
+           (is-false (terminal-job-control-active-p)))
+      (c-close r) (c-close w))))
+
+(test terminal-handoff-is-safe-when-inactive
+  "give-terminal-to-job / reclaim-terminal are no-ops (never error) with no tty."
+  (let ((*terminal-fd* nil) (*shell-pgid* nil)
+        (j (run-job (make-pipeline (list (external "sh" "-c" "printf 'x\\n'")))
+                    :background t)))
+    (finishes (reclaim-terminal))
+    (finishes (give-terminal-to-job j))
+    (is (equal '("x") (fg j)))))                     ; fg still works with no tty
+
+(test job-stopped-predicate-false-for-a-running-job
+  (let ((j (run-job (make-pipeline (list (external "sleep" "5"))) :background t)))
+    (unwind-protect (is-false (consh::%job-stopped-p j))
+      (kill-job j))))

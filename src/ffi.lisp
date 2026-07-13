@@ -93,6 +93,20 @@
 (defconstant +sigstop+ (if (member :darwin *features*) 17 19))
 (defconstant +sigtstp+ (if (member :darwin *features*) 18 20))
 (defconstant +sigchld+ (if (member :darwin *features*) 20 17))
+(defconstant +sigttin+ 21)              ; same on Linux and macOS
+(defconstant +sigttou+ 22)
+
+(defmacro with-signal-ignored ((signum) &body body)
+  "Run BODY with SIGNUM set to SIG_IGN, restoring the previous disposition after.
+Used to shield the shell from the SIGTTOU it would receive when calling
+tcsetpgrp from a background process group."
+  (let ((sig (gensym "SIG")) (old (gensym "OLD")))
+    `(let* ((,sig ,signum)
+            ;; signal(2): SIG_IGN is the pointer value 1; returns the old handler.
+            (,old (cffi:foreign-funcall "signal" :int ,sig
+                                        :pointer (cffi:make-pointer 1) :pointer)))
+       (unwind-protect (progn ,@body)
+         (cffi:foreign-funcall "signal" :int ,sig :pointer ,old :pointer)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Small helpers
@@ -232,6 +246,16 @@ number.  Encoding is the classic wait(2) layout shared by Linux and macOS."
   (with-errno (rc errno) (cffi:foreign-funcall "tcsetpgrp" :int fd :int pgid :int)
     (if (= rc 0) t
         (error 'ffi-error :syscall "tcsetpgrp" :errno errno))))
+
+(defun c-tcgetpgrp (fd)
+  "tcgetpgrp(3): the foreground process-group id of terminal FD, or NIL on error
+(e.g. FD is not a terminal)."
+  (let ((rc (cffi:foreign-funcall "tcgetpgrp" :int fd :int)))
+    (if (>= rc 0) rc nil)))
+
+(defun c-isatty (fd)
+  "isatty(3): true when FD refers to a terminal."
+  (= 1 (cffi:foreign-funcall "isatty" :int fd :int)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; posix_spawn(3) + file_actions + attributes

@@ -18,7 +18,7 @@ POSIX-compliant: there is no string `eval`, no word-splitting layer — argument
 are Lisp values and globbing returns pathnames.
 
 Built on SBCL in the phase order of [`SPEC.md`](SPEC.md), each phase ending with
-its FiveAM suite green (**1251 checks**).
+its FiveAM suite green (**1265 checks**).
 
 ```
                  bytes                         objects
@@ -208,7 +208,11 @@ source:
 
 Backgrounding (`&`) makes a **job**; the `jobs`, `fg`, `bg`, `wait`, and `kill`
 builtins drive the job objects (`kill %1` reclaims the whole process group;
-`kill -9 PID` signals a bare pid).
+`kill -9 PID` signals a bare pid). On a real tty, `fg` performs a proper
+`tcsetpgrp` handoff — the job's process group becomes the terminal's foreground
+group (so C-c/C-z reach the job, not the shell), and the shell reclaims the
+terminal when the job finishes or stops (SIGTTOU-safe). Under a pipe or without a
+tty it all degrades to a no-op.
 
 
 ## Processes & object channels
@@ -319,7 +323,7 @@ line, or tears down a running foreground job; **Ctrl-D** exits.
 | `src/invocation.lisp`, `parse.lisp`, `dialect.lisp`, `wrappers/` | 3 | Per-command parser protocol; lazy channel-backed object sequences; `parse-error` restarts; GNU/BSD **dialect probing/translation** (`stat` picks `-c`/`-f`; `sed -i`/`date -d @` rewritten to BSD); `ls`/`find` **stat-enrich** to `file-info`, `grep -n` → `grep-match`, `df` → `filesystem`, `wc` → `wc-count`, `du` → `du-entry`, `git status`, `ps`, `lsblk -J` **JSON** → `block-device` |
 | `src/pipeline.lisp`, `exec.lisp` | 4 | `pipe` macro, plumbing/fusion compiler, pump threads, stderr drainers, `pipeline-result`, cancellation; native in-image `grep`/`cat`/`sort`/`uniq` stages |
 | `src/jobs.lisp` | 5 | Job objects, fg/bg, C-z, job events, `debug-job` cross-thread conditions |
-| `src/surface.lisp` | 6 | Reader sugar, prompt function, history, completion, aliases, job-control builtins (`jobs`/`fg`/`bg`/`wait`/`kill`) |
+| `src/surface.lisp` | 6 | Reader sugar, prompt function, history, completion, aliases, job-control builtins with real tcsetpgrp terminal handoff |
 | `src/present.lisp` | — | Presentation layer: `table` renders an object stream as an aligned grid via each type's `table-columns` |
 
 Thread discipline (SPEC §5): one reaper for the image, woken by a minimal

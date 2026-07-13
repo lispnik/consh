@@ -5,6 +5,29 @@
 (def-suite ffi :in consh :description "Raw syscall bindings.")
 (in-suite ffi)
 
+(test isatty-false-for-a-pipe
+  "isatty(2) is false for a pipe fd (there is no terminal on either end)."
+  (multiple-value-bind (r w) (make-pipe)
+    (unwind-protect
+         (progn (is-false (c-isatty r))
+                (is-false (c-isatty w)))
+      (c-close r) (c-close w))))
+
+(test tcgetpgrp-nil-for-a-pipe
+  "tcgetpgrp on a non-terminal fd returns NIL rather than erroring."
+  (multiple-value-bind (r w) (make-pipe)
+    (unwind-protect (is (null (c-tcgetpgrp r)))
+      (c-close r) (c-close w))))
+
+(test with-signal-ignored-runs-body-and-restores
+  "with-signal-ignored evaluates its body (returning its value) and restores the
+previous SIGTTOU disposition afterward."
+  (let ((ran nil))
+    (is (= 42 (with-signal-ignored (+sigttou+) (setf ran t) 42)))
+    (is-true ran)
+    ;; a second use still works — disposition was restored, not left as SIG_IGN
+    (is (eq :ok (with-signal-ignored (+sigttou+) :ok)))))
+
 (test pipe-and-cloexec
   "make-pipe returns two usable fds with FD_CLOEXEC set by default."
   (multiple-value-bind (r w) (make-pipe)

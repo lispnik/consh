@@ -289,14 +289,73 @@ on timeout."
   (let ((result (job-result job)))
     (and result (run-state-pgid (pipeline-result-state result)))))
 
+;;; ---------------------------------------------------------------------------
+;;; Controlling terminal (SPEC §6: real job control)
+;;; ---------------------------------------------------------------------------
+;;;
+;;; When consh runs on a real tty we hand terminal ownership to a foregrounded
+;;; job with tcsetpgrp, so keyboard signals (C-c / C-z) reach the *job's* process
+;;; group and terminal-reading commands work, then reclaim it for the shell when
+;;; the job finishes or stops.  The shell would be sent SIGTTOU for calling
+;;; tcsetpgrp while it is (transiently) a background group, so we ignore SIGTTOU
+;;; across the call.  Everything degrades to a no-op when there is no tty (pipes,
+;;; scripts, the test suite), so nothing here changes non-interactive behaviour.
+
+(defvar *terminal-fd* nil
+  "FD of the controlling terminal when interactive job control is on; else NIL.")
+(defvar *shell-pgid* nil
+  "The shell's own process group — the terminal's foreground group between jobs.")
+
+(defun terminal-job-control-active-p ()
+  (and *terminal-fd* t))
+
+(defun %tcsetpgrp-guarded (fd pgid)
+  "tcsetpgrp FD -> PGID with SIGTTOU ignored and errors swallowed."
+  (with-signal-ignored (+sigttou+)
+    (ignore-errors (c-tcsetpgrp fd pgid))))
+
+(defun enable-terminal-job-control (&optional (fd 0))
+  "Turn on real job control if FD is a tty: record the terminal and the shell's
+pgid, and make the shell the terminal's foreground group.  Returns T when active,
+NIL (a no-op) otherwise."
+  (when (c-isatty fd)
+    (setf *shell-pgid* (ignore-errors (c-getpgid 0))
+          *terminal-fd* fd)
+    (when *shell-pgid* (%tcsetpgrp-guarded fd *shell-pgid*))
+    t))
+
+(defun give-terminal-to-job (job)
+  "Hand the controlling terminal to JOB's process group (no-op when inactive)."
+  (let ((pgid (%job-pgid job)))
+    (when (and *terminal-fd* pgid)
+      (%tcsetpgrp-guarded *terminal-fd* pgid))))
+
+(defun reclaim-terminal ()
+  "Return the controlling terminal to the shell (no-op when inactive)."
+  (when (and *terminal-fd* *shell-pgid*)
+    (%tcsetpgrp-guarded *terminal-fd* *shell-pgid*)))
+
+(defun disable-terminal-job-control ()
+  (reclaim-terminal)
+  (setf *terminal-fd* nil *shell-pgid* nil))
+
+(defun %job-stopped-p (job)
+  "True if JOB has an external process currently stopped (SIGTSTP/SIGSTOP)."
+  (let ((result (job-result job)))
+    (and result
+         (some (lambda (p) (eq (process-status p) :stopped))
+               (pipeline-result-processes result)))))
+
 (defun stop-job (job)
   "C-z: stop the job.  Pause the shared stop-flag (parking Lisp workers at their
-next channel op) and SIGTSTP the external process group."
+next channel op) and SIGTSTP the external process group.  The shell reclaims the
+terminal."
   (let ((j (find-job job)))
     (stop-flag-pause (job-stop-flag j))
     (let ((pgid (%job-pgid j)))
       (when pgid (ignore-errors (c-killpg pgid +sigtstp+))))
     (sb-thread:with-mutex ((job-lock j)) (setf (job-state j) :stopped))
+    (reclaim-terminal)
     (%post-event j (format nil "job ~D stopped" (job-id j)))
     j))
 
@@ -312,19 +371,40 @@ workers."
       (%post-event j (format nil "job ~D continued" (job-id j))))
     j))
 
+(defun %fg-wait (job timeout)
+  "Wait while JOB holds the terminal.  With real job control we poll so a
+tty-delivered SIGTSTP — which stops the job's group but not the shell — wakes us
+to hand the terminal back; the job is then recorded as stopped.  Without a tty
+this is just WAIT-JOB (honouring TIMEOUT)."
+  (if (not (terminal-job-control-active-p))
+      (wait-job job :timeout timeout)
+      (loop
+        (multiple-value-bind (output done) (wait-job job :timeout 0.15)
+          (when done (return output))
+          (when (%job-stopped-p job)
+            (stop-flag-pause (job-stop-flag job))
+            (sb-thread:with-mutex ((job-lock job)) (setf (job-state job) :stopped))
+            (%post-event job (format nil "job ~D stopped" (job-id job)))
+            (return nil))))))
+
 (defun fg (job &key timeout)
-  "Foreground JOB: resume it if stopped, then wait for completion and return its
-output (SPEC §6; tcsetpgrp is a no-op without a controlling terminal)."
+  "Foreground JOB: resume it if stopped, hand it the controlling terminal, wait
+for it to finish (or stop), and return its output — reclaiming the terminal for
+the shell afterward (SPEC §6).  Terminal handoff is a no-op without a tty."
   (let ((j (find-job job)))
     (continue-job j)
     (setf (job-background-p j) nil)
-    (wait-job j :timeout timeout)))
+    (give-terminal-to-job j)
+    (unwind-protect (%fg-wait j timeout)
+      (reclaim-terminal))))
 
 (defun bg (job)
-  "Background JOB: resume it if stopped and return immediately."
+  "Background JOB: resume it if stopped and return immediately, keeping the
+terminal with the shell."
   (let ((j (find-job job)))
     (continue-job j)
     (setf (job-background-p j) t)
+    (reclaim-terminal)
     j))
 
 (defun kill-job (job)
