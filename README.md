@@ -6,8 +6,8 @@ A Unix shell implemented as a Common Lisp image — **pipelines carry CLOS
 objects, not bytes.**
 
 <p align="center">
-  <img src="assets/demo.gif" width="800"
-       alt="A consh session: a command, a pipeline, `ls` yielding file-info objects, a $()-escape to Lisp, and a bare Lisp form — all at one prompt.">
+  <img src="assets/demo.gif" width="820"
+       alt="A consh session: an external seq|grep pipeline, then `ls` yielding file-info objects, filtering those objects by a Lisp predicate on file-size, folding find's enriched output into a byte total, and a $()-escape to Lisp — all at one prompt.">
 </p>
 
 Text exists only at the boundary with external processes and the terminal.
@@ -18,7 +18,7 @@ POSIX-compliant: there is no string `eval`, no word-splitting layer — argument
 are Lisp values and globbing returns pathnames.
 
 Built on SBCL in the phase order of [`SPEC.md`](SPEC.md), each phase ending with
-its FiveAM suite green (**908 checks**).
+its FiveAM suite green (**1138 checks**).
 
 ```
                  bytes                         objects
@@ -71,10 +71,13 @@ ocicl install          # restore deps pinned in ocicl.csv into ./ocicl/
 and put it on your `PATH`:
 
 ```sh
-sbcl --non-interactive --eval '(asdf:make :consh)'   # -> ./consh
+make                                                 # -> ./consh (or: make build)
 install -m 755 consh ~/.local/bin/consh              # or /usr/local/bin (sudo)
 consh
 ```
+
+The [`Makefile`](Makefile) also has `make test` (run the FiveAM suite),
+`make deps` (`ocicl install`), and `make demo` (re-record the GIF above).
 
 **Or use it from a REPL** — which is how the examples below run (`=>` shows the
 real returned value):
@@ -87,7 +90,8 @@ sbcl                   # run inside the cloned repo
 (in-package :consh)
 ```
 
-Run the tests with `sbcl --non-interactive --eval '(asdf:test-system :consh)'`.
+Run the tests with `make test` (or
+`sbcl --non-interactive --eval '(asdf:test-system :consh)'`).
 
 
 ## The idea: objects, not bytes
@@ -315,10 +319,10 @@ names itself; a stderr flood doesn't deadlock; C-z freezes and resumes intact;
 ## Building a standalone executable
 
 The `consh` system is wired for ASDF's `program-op`, so it dumps a self-contained
-image with a REPL entry point (`consh:main`):
+image with a REPL entry point (`consh:main`).  `make` wraps this:
 
 ```console
-$ sbcl --non-interactive --eval '(asdf:make :consh)'    # -> ./consh
+$ make                                                  # -> ./consh
 $ printf 'echo hi from the image\nseq 1 3 | grep 2\n(+ 40 2)\n' | ./consh
 consh — a Common Lisp Unix shell (objects, not bytes). Ctrl-D to exit.
 consh consh> hi from the image

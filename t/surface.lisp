@@ -97,6 +97,14 @@
 (test eval-bare-lisp-form
   (is (= 42 (shell-eval "(+ 40 2)"))))
 
+(test eval-lisp-line-reaches-consh-vocabulary
+  "A Lisp line read in the CONSH package (as the dumped-image REPL binds it) can
+name the shell's own vocabulary unqualified — pipe, pipeline-collect, external."
+  (let ((*package* (find-package '#:consh)))
+    (is (equal '("a" "b")
+               (shell-eval
+                "(pipeline-collect (pipe (:generate (emit) (funcall emit \"a\") (funcall emit \"b\"))))")))))
+
 (test eval-background-returns-a-job
   (let ((job (shell-eval "echo bgtest &")))
     (is (typep job 'job))

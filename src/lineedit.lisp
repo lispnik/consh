@@ -254,7 +254,10 @@ line (or, mid-command, tears the job down); Ctrl-D / EOF ends the loop."
    (setf *current-directory* (truename (pathname (format nil "~A/" (sb-posix:getcwd))))))
   (format t "consh — a Common Lisp Unix shell (objects, not bytes). Ctrl-D to exit.~%")
   (finish-output)
-  (handler-case (shell-repl)
+  ;; Read/eval Lisp lines in the CONSH package so the shell's own vocabulary
+  ;; (pipe, pipeline-collect, file-size, ...) is available unqualified at the
+  ;; prompt — an object shell is only usable if its objects are in reach.
+  (handler-case (let ((*package* (find-package '#:consh))) (shell-repl))
     (sb-sys:interactive-interrupt () (terpri)))
   (finish-output)
   (sb-ext:exit :code 0))
