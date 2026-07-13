@@ -97,6 +97,8 @@
    #:git-status-index-char #:git-status-worktree-char
    #:git-status-untracked-p #:git-status-ignored-p
    #:git-status-staged-p #:git-status-unstaged-p
+   #:ps-invocation #:ps-process #:ps-process-pid #:ps-process-ppid
+   #:ps-process-user #:ps-process-rss #:ps-process-state #:ps-process-command
    ;; ---- Phase 4: pipeline compiler + executor ----
    #:runnable-seq
    ;; stage + pipeline objects

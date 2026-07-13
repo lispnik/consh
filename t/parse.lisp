@@ -633,3 +633,55 @@ not the process working directory (consh never chdir's)."
                       :test #'equal)))
         (is (typep e 'git-status))
         (is (git-status-untracked-p e))))))
+
+;;; ===========================================================================
+;;; ps wrapper: fixed columns -> process objects
+;;; ===========================================================================
+
+(test ps-parses-columns-into-process-objects
+  (let* ((inv (rewrite-invocation (make-invocation "ps")))
+         (input (format nil "90201 90198 mkennedy 160768 S+   claude --flag~%~
+                             ~4T1     0 root       120 Ss   /sbin/launchd~%"))
+         (objs (seq-collect (parse-output inv (make-string-input-stream input)))))
+    (is (= 2 (length objs)))
+    (is (every (lambda (o) (typep o 'ps-process)) objs))
+    (destructuring-bind (a b) objs
+      (is (= 90201 (ps-process-pid a)))
+      (is (= 90198 (ps-process-ppid a)))
+      (is (string= "mkennedy" (ps-process-user a)))
+      (is (= 160768 (ps-process-rss a)))
+      (is (string= "S+" (ps-process-state a)))
+      (is (string= "claude --flag" (ps-process-command a)))   ; command keeps spaces
+      (is (= 1 (ps-process-pid b)))
+      (is (string= "/sbin/launchd" (ps-process-command b))))))
+
+(test ps-rewrite-imposes-format-unless-user-gave-one
+  (is (equal '("-o" "pid=,ppid=,user=,rss=,stat=,command=")
+             (invocation-arguments (rewrite-invocation (make-invocation "ps")))))
+  ;; preserves selection args, appends -o
+  (is (equal '("-A" "-o" "pid=,ppid=,user=,rss=,stat=,command=")
+             (invocation-arguments (rewrite-invocation (make-invocation "ps" "-A")))))
+  ;; a user-supplied -o is left alone
+  (let ((inv (make-invocation "ps" "-o" "pid,comm")))
+    (is (eq inv (rewrite-invocation inv)))))
+
+(test ps-user-format-yields-lines
+  (let ((inv (make-invocation "ps" "-o" "pid,comm")))
+    (is (equal '("100 bash" "200 vim")
+               (seq-collect (parse-output inv (%porcelain-stream "100 bash" "200 vim")))))))
+
+(test ps-malformed-line-signals
+  (signals parse-error
+    (consh::%parse-ps-line (make-invocation "ps") "only two")))
+
+(test ps-real-finds-current-process
+  "Run the real `ps`: the wrapper imposes its columns and yields ps-process
+objects; our own SBCL process is among them."
+  (let* ((mypid (sb-posix:getpid))
+         (objs (pipeline-collect
+                (make-pipeline (list (external "ps" "-p" (princ-to-string mypid))))))
+         (me (find mypid objs
+                   :key (lambda (x) (and (typep x 'ps-process) (ps-process-pid x))))))
+    (is (typep me 'ps-process))
+    (is (= mypid (ps-process-pid me)))
+    (is (search "sbcl" (string-downcase (ps-process-command me))))))
