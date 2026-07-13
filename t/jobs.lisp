@@ -351,3 +351,10 @@ leaves the shell in non-interactive mode."
   (let ((j (run-job (make-pipeline (list (external "sleep" "5"))) :background t)))
     (unwind-protect (is-false (consh::%job-stopped-p j))
       (kill-job j))))
+
+(test give-terminal-to-pgid-is-safe-when-inactive
+  "Handing the terminal to a pgid is a no-op (never errors) with no tty, and NIL
+pgid is tolerated."
+  (let ((*terminal-fd* nil) (*shell-pgid* nil))
+    (finishes (give-terminal-to-pgid 999999))
+    (finishes (give-terminal-to-pgid nil))))

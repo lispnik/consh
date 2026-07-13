@@ -150,7 +150,7 @@
    ;; controlling terminal / real job control
    #:*terminal-fd* #:*shell-pgid* #:terminal-job-control-active-p
    #:enable-terminal-job-control #:disable-terminal-job-control
-   #:give-terminal-to-job #:reclaim-terminal
+   #:give-terminal-to-job #:give-terminal-to-pgid #:reclaim-terminal
    #:debug-job #:resume-job #:take-job-events
    #:skip-object
    ;; ---- Phase 6: surface syntax ----

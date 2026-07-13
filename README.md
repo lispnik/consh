@@ -18,7 +18,7 @@ POSIX-compliant: there is no string `eval`, no word-splitting layer — argument
 are Lisp values and globbing returns pathnames.
 
 Built on SBCL in the phase order of [`SPEC.md`](SPEC.md), each phase ending with
-its FiveAM suite green (**1265 checks**).
+its FiveAM suite green (**1268 checks**).
 
 ```
                  bytes                         objects
@@ -208,11 +208,12 @@ source:
 
 Backgrounding (`&`) makes a **job**; the `jobs`, `fg`, `bg`, `wait`, and `kill`
 builtins drive the job objects (`kill %1` reclaims the whole process group;
-`kill -9 PID` signals a bare pid). On a real tty, `fg` performs a proper
-`tcsetpgrp` handoff — the job's process group becomes the terminal's foreground
-group (so C-c/C-z reach the job, not the shell), and the shell reclaims the
-terminal when the job finishes or stops (SIGTTOU-safe). Under a pipe or without a
-tty it all degrades to a no-op.
+`kill -9 PID` signals a bare pid). On a real tty there is proper `tcsetpgrp` job
+control: a foreground command (and `fg`) gets the controlling terminal — its
+process group becomes the terminal's foreground group, so **C-c interrupts the
+command, not the shell** — and the shell reclaims the terminal when the command
+finishes or stops (SIGTTOU-safe). Under a pipe or without a tty it all degrades
+to a no-op.
 
 
 ## Processes & object channels

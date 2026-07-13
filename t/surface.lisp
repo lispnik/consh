@@ -87,6 +87,14 @@
 (test eval-runs-a-pipeline
   (is (equal '("1" "2" "3") (shell-eval "seq 1 3 | cat"))))
 
+(test foreground-run-without-tty-just-collects
+  "Without a controlling terminal, %run-foreground is plain pipeline-collect —
+the terminal-handoff path is skipped."
+  (let ((*terminal-fd* nil))
+    (is (equal '("hi")
+               (consh::%run-foreground
+                (make-pipeline (list (external "sh" "-c" "printf 'hi\\n'"))))))))
+
 (test eval-dollar-escape-evaluates-lisp
   (is (equal '("HI") (shell-eval "echo $(string-upcase \"hi\")"))))
 

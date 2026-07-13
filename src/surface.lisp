@@ -292,12 +292,25 @@ call; everything else desugars to a pipeline run."
             (cons 'list (mapcar #'%stage->form stages))
             :background background))))
 
+(defun %run-foreground (pipeline)
+  "Run PIPELINE in the foreground and return its collected output.  On a real
+tty, hand the pipeline's process group the controlling terminal while it runs —
+so keyboard signals (C-c) reach the running command, not the shell, and a command
+reading the tty works — then reclaim the terminal.  A no-op handoff without a tty
+or for a pure-Lisp pipeline (no process group)."
+  (if (not (terminal-job-control-active-p))
+      (pipeline-collect pipeline)
+      (let ((result (run-pipeline pipeline)))
+        (give-terminal-to-pgid (run-state-pgid (pipeline-result-state result)))
+        (unwind-protect (pipeline-collect result)
+          (reclaim-terminal)))))
+
 (defun %shell-run (stages &key background)
   "Run the desugared STAGES: collect output (foreground) or start a job (&)."
   (let ((pipeline (make-pipeline stages)))
     (if background
         (run-job pipeline :background t)
-        (pipeline-collect pipeline))))
+        (%run-foreground pipeline))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Builtins (SPEC §1: the user environment is the image)

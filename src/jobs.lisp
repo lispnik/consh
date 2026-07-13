@@ -324,11 +324,15 @@ NIL (a no-op) otherwise."
     (when *shell-pgid* (%tcsetpgrp-guarded fd *shell-pgid*))
     t))
 
+(defun give-terminal-to-pgid (pgid)
+  "Hand the controlling terminal to process group PGID (a no-op when job control
+is inactive or PGID is NIL — e.g. a pure-Lisp pipeline with no processes)."
+  (when (and *terminal-fd* pgid)
+    (%tcsetpgrp-guarded *terminal-fd* pgid)))
+
 (defun give-terminal-to-job (job)
   "Hand the controlling terminal to JOB's process group (no-op when inactive)."
-  (let ((pgid (%job-pgid job)))
-    (when (and *terminal-fd* pgid)
-      (%tcsetpgrp-guarded *terminal-fd* pgid))))
+  (give-terminal-to-pgid (%job-pgid job)))
 
 (defun reclaim-terminal ()
   "Return the controlling terminal to the shell (no-op when inactive)."
