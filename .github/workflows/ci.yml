@@ -14,12 +14,15 @@ jobs:
   test:
     name: Tests (SBCL / ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # GitHub's macOS runners currently deny posix_spawn (EPERM in bursts that
+    # outlast the spawn-level retry below) and race on relative-path exec,
+    # failing unrelated spawn-heavy tests. The suite passes locally on macOS and
+    # Ubuntu is the hard gate, so keep macOS visible but non-blocking until the
+    # runner recovers.
+    continue-on-error: ${{ contains(matrix.os, 'macos') }}
     strategy:
       fail-fast: false
       matrix:
-        # Pin macOS to the last stable image: macos-latest now tracks the macOS
-        # 26 beta runner, whose sandbox denies posix_spawn with EPERM in bursts
-        # that outlast even the spawn-level retry below.
         os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v4
