@@ -64,9 +64,16 @@
                     :int)
       0))
 
-;;; A handful of errno constants (values agree across Linux and macOS).
+;;; A handful of errno constants (values agree across Linux and macOS unless a
+;;; platform branch is shown).
 (defconstant +eintr+  4)
 (defconstant +echild+ 10)
+(defconstant +eperm+  1)
+(defconstant +eagain+ (if (member :darwin *features*) 35 11))
+
+;; Bounded retry for transient posix_spawn failures (EAGAIN / spurious EPERM).
+(defparameter +spawn-max-attempts+ 8)
+(defparameter +spawn-retry-seconds+ 0.025)
 
 (defun errno-name (errno)
   "Best-effort symbolic name for ERRNO via strerror."
@@ -405,14 +412,27 @@ including argv[0]).  Returns the child pid.
                            :pointer argv
                            :pointer envp-ptr
                            :int)))
-                   (let ((rc (if environment
-                                 (with-foreign-string-vector
-                                     (custom-envp (%build-envp-strings environment))
-                                   (do-spawn custom-envp))
-                                 (do-spawn envp))))
-                     (unless (= rc 0)
-                       (error 'spawn-error :program program :syscall fn-name :errno rc))
-                     (cffi:mem-ref pid-out :int)))))))
+                   (flet ((attempt ()
+                            (if environment
+                                (with-foreign-string-vector
+                                    (custom-envp (%build-envp-strings environment))
+                                  (do-spawn custom-envp))
+                                (do-spawn envp))))
+                     ;; posix_spawn can fail transiently under resource/scheduler
+                     ;; pressure — EAGAIN (fork limit) and, on some sandboxed
+                     ;; hosts (GitHub's macOS runners), a spurious EPERM.  Retry a
+                     ;; few times with a short backoff; a genuine error still
+                     ;; surfaces after the last attempt.
+                     (let ((rc (loop for tries from 1
+                                     for result = (attempt)
+                                     when (or (= result 0)
+                                              (not (or (= result +eagain+) (= result +eperm+)))
+                                              (>= tries +spawn-max-attempts+))
+                                       return result
+                                     do (sleep +spawn-retry-seconds+))))
+                       (unless (= rc 0)
+                         (error 'spawn-error :program program :syscall fn-name :errno rc))
+                       (cffi:mem-ref pid-out :int))))))))
       ;; cleanup
       (when fa-inited
         (cffi:foreign-funcall "posix_spawn_file_actions_destroy" :pointer fa-buf :int))
