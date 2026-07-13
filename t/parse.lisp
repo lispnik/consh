@@ -274,10 +274,12 @@ enriched."
                  (unparse-input (make-invocation "cat") (list 1 "two" :three) s)))))
 
 ;;; ---------------------------------------------------------------------------
-;;; find: pathnames, NUL-splitting, and the -print0 rewrite
+;;; find: stat-enriched file objects, NUL-splitting, and the -print0 rewrite
 ;;; ---------------------------------------------------------------------------
 
-(test find-yields-pathnames
+(test find-unstattable-paths-fall-back-to-pathnames
+  "Paths that cannot be stat'd (here, ones that do not exist) degrade to bare
+pathnames rather than aborting the traversal."
   (let* ((inv (make-invocation "find" "/tmp"))
          (objs (seq-collect (parse-output inv (string-stream-of "/a" "/b/c")))))
     (is (= 2 (length objs)))
@@ -289,7 +291,63 @@ enriched."
          (data (format nil "/x~C/y~C/z" #\Nul #\Nul))   ; last record unterminated
          (objs (seq-collect (parse-output inv (make-string-input-stream data)))))
     (is-true (find-print0-p inv))
+    ;; nonexistent -> pathname fallback; NUL-splitting still yields three records
     (is (equal '("/x" "/y" "/z") (mapcar #'namestring objs)))))
+
+(test find-enriches-existing-paths-to-file-objects
+  "Acceptance: find stat(2)s each path it prints and yields FILE-INFO objects."
+  (let ((dir (make-temp-dir)))
+    (with-open-file (s (merge-pathnames "a.txt" dir) :direction :output)
+      (write-string "hello" s))                     ; 5 bytes
+    (with-open-file (s (merge-pathnames "b.txt" dir) :direction :output)
+      (write-string "worldwide" s))                 ; 9 bytes
+    (let* ((*current-directory* dir)
+           (inv (make-invocation "find" "."))
+           (a (namestring (merge-pathnames "a.txt" dir)))
+           (b (namestring (merge-pathnames "b.txt" dir)))
+           (objs (seq-collect (parse-output inv (string-stream-of a b)))))
+      (is (= 2 (length objs)))
+      (is (every (lambda (o) (typep o 'file-info)) objs))
+      (let ((fa (find "a.txt" objs :key (lambda (o) (file-namestring (file-path o)))
+                                   :test #'string=))
+            (fb (find "b.txt" objs :key (lambda (o) (file-namestring (file-path o)))
+                                   :test #'string=)))
+        (is (= 5 (file-size fa)))
+        (is (= 9 (file-size fb)))
+        (is (stringp (file-owner fa)))
+        (is (equal (uid-username (sb-posix:getuid)) (file-owner fa)))))))
+
+(test find-mixes-enriched-and-fallback
+  "A stream of one real path and one vanished path yields a file-info and a
+pathname respectively — enrichment is per-record and best-effort."
+  (let ((dir (make-temp-dir)))
+    (with-open-file (s (merge-pathnames "real.txt" dir) :direction :output)
+      (write-string "xyz" s))                       ; 3 bytes
+    (let* ((*current-directory* dir)
+           (inv (make-invocation "find" "."))
+           (real (namestring (merge-pathnames "real.txt" dir)))
+           (gone (namestring (merge-pathnames "gone.txt" dir)))
+           (objs (seq-collect (parse-output inv (string-stream-of real gone)))))
+      (is (= 2 (length objs)))
+      (is (typep (first objs) 'file-info))
+      (is (= 3 (file-size (first objs))))
+      (is (pathnamep (second objs))))))
+
+(test find-real-print0-enriches-end-to-end
+  "End-to-end: the wrapper rewrites to -print0, runs the real `find`, splits on
+NUL, and enriches each entry to a FILE-INFO."
+  (let ((dir (make-temp-dir)))
+    (with-open-file (s (merge-pathnames "only.txt" dir) :direction :output)
+      (write-string "sevench" s))                   ; 7 bytes
+    (let* ((*current-directory* dir)
+           (objs (pipeline-collect
+                  (make-pipeline (list (external "find" (namestring dir) "-type" "f")))))
+           (f (find "only.txt" objs
+                    :key (lambda (o) (and (typep o 'file-info)
+                                          (file-namestring (file-path o))))
+                    :test #'equal)))
+      (is (typep f 'file-info))
+      (is (= 7 (file-size f))))))
 
 (test find-rewrite-adds-print0
   (let* ((inv (make-invocation "find" "/tmp"))

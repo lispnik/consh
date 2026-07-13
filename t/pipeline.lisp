@@ -506,14 +506,15 @@ started (no leaked processes)."
 ;;; run-and-parse rewrite is applied to the run's tail (SPEC §2)
 ;;; ===========================================================================
 
-(test find-pipeline-yields-pathname-objects
+(test find-pipeline-yields-enriched-file-objects
   (let ((dir (make-temp-dir)))
     (with-open-file (s (merge-pathnames "one.txt" dir) :direction :output)
       (write-string "x" s))
-    (let ((paths (pipeline-collect
-                  (make-pipeline (list (external "find" (namestring dir) "-type" "f"))))))
-      (is (every #'pathnamep paths))
-      (is (member "one.txt" paths :key #'file-namestring :test #'string=)))))
+    (let ((objs (pipeline-collect
+                 (make-pipeline (list (external "find" (namestring dir) "-type" "f"))))))
+      (is (every (lambda (o) (typep o 'file-info)) objs))
+      (is (member "one.txt" objs
+                  :key (lambda (o) (file-namestring (file-path o))) :test #'string=)))))
 
 (test executor-rewrites-tail-to-print0
   "The executor applies rewrite-invocation to the run's tail: `find` gets
@@ -523,10 +524,14 @@ line-splitting (no rewrite) would return it as two bogus records."
          (weird (merge-pathnames
                  (make-pathname :name (format nil "a~Cb" #\Newline) :type "txt") dir)))
     (with-open-file (s weird :direction :output) (write-string "x" s))
-    (let ((paths (pipeline-collect
-                  (make-pipeline (list (external "find" (namestring dir) "-type" "f"))))))
-      (is (= 1 (length paths)))                         ; NUL-delimited: one record
-      (is (pathnamep (first paths))))))
+    (let ((objs (pipeline-collect
+                 (make-pipeline (list (external "find" (namestring dir) "-type" "f"))))))
+      (is (= 1 (length objs)))                          ; NUL-delimited: one record
+      ;; the newline-named file exists, so it enriches; the point is it is ONE
+      ;; record, not two bogus ones from newline-splitting
+      (is (typep (first objs) 'file-info))
+      (is (search (format nil "a~Cb" #\Newline)
+                  (file-namestring (file-path (first objs))))))))
 
 (test intermediate-external-is-not-rewritten
   "An intermediate external keeps normal (newline) output so the next external
