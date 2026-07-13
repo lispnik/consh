@@ -92,6 +92,7 @@
    ;; wrappers: find / cat / grep / stat / git
    #:find-invocation #:find-print0-p #:find-start
    #:cat-invocation #:grep-invocation #:stat-invocation
+   #:grep-match #:grep-match-file #:grep-match-line-number #:grep-match-text
    #:git-invocation #:git-subcommand
    #:git-status #:git-status-code #:git-status-path #:git-status-orig-path
    #:git-status-index-char #:git-status-worktree-char

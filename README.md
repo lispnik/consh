@@ -7,7 +7,7 @@ objects, not bytes.**
 
 <p align="center">
   <img src="assets/demo.gif" width="820"
-       alt="A consh session: an external seq|grep pipeline, then `ls` yielding file-info objects, filtering those objects by a Lisp predicate on file-size, folding find's enriched output into a byte total, and a $()-escape to Lisp — all at one prompt.">
+       alt="A consh session: a seq|grep pipeline whose grep hands back a match object (line number + text), then `ls` yielding file-info objects, filtering those objects by a Lisp predicate on file-size, folding find's enriched output into a byte total, and a $()-escape to Lisp — all at one prompt.">
 </p>
 
 Text exists only at the boundary with external processes and the terminal.
@@ -22,9 +22,9 @@ its FiveAM suite green (**1138 checks**).
 
 ```
                  bytes                         objects
-   ┌────────┐  kernel pipe  ┌────────┐  parse  ┌───────────┐  Lisp fn  ┌─────────┐
-   │  find  │ ────────────▶ │  grep  │ ──────▶ │ file-info │ ────────▶ │ :filter │ ─▶ results
-   └────────┘               └────────┘         └───────────┘           └─────────┘
+   ┌────────┐  kernel pipe  ┌────────┐  parse  ┌────────────┐  Lisp fn  ┌─────────┐
+   │  find  │ ────────────▶ │  grep  │ ──────▶ │ grep-match │ ────────▶ │ :filter │ ─▶ results
+   └────────┘               └────────┘         └────────────┘           └─────────┘
         └──────── one pgid, killpg to abort ────────┘        └── fused, one thread ──┘
 ```
 
@@ -250,7 +250,7 @@ surface just desugars to the pipeline/job forms above.
 
 ```lisp
 (shell-eval "echo hello")                    => ("hello")
-(shell-eval "seq 1 5 | grep 3")              => ("3")
+(shell-eval "seq 1 5 | grep 3")              => (#<GREP-MATCH 3 "3">)  ; grep -n enriches
 (shell-eval "echo $HOME/notes")              => ("/home/you/notes")  ; $VAR expands
 (shell-eval "cat *.txt")                     ; globs to matching pathnames
 (shell-eval "sort < in.txt > out.txt")       ; < > >> 2> redirections
@@ -287,7 +287,7 @@ line, or tears down a running foreground job; **Ctrl-D** exits.
 | `src/ffi.lisp` | 1 | CFFI: `pipe`, `posix_spawn` (+ file actions incl. per-child `chdir`), `waitpid`, `kill`/`killpg`, `stat`, `getpwuid` |
 | `src/reaper.lisp` | 1 | Process objects; the single, **SIGCHLD-driven** `waitpid` reaper thread; `*current-directory*` (no process-wide `chdir`, ever) |
 | `src/channel.lisp` | 2 | Bounded object channels: backpressure, EOF, downstream cancellation, stop-flag parking |
-| `src/invocation.lisp`, `parse.lisp`, `dialect.lisp`, `wrappers/` | 3 | Per-command parser protocol; lazy channel-backed object sequences; `parse-error` restarts; GNU/BSD **dialect probing** (`stat` picks `-c` vs `-f`); `ls`/`find` **stat-enrich** to `file-info`, `cat`/`grep`, `git status --porcelain`, `ps`, `lsblk -J` **JSON** → `block-device` |
+| `src/invocation.lisp`, `parse.lisp`, `dialect.lisp`, `wrappers/` | 3 | Per-command parser protocol; lazy channel-backed object sequences; `parse-error` restarts; GNU/BSD **dialect probing** (`stat` picks `-c` vs `-f`); `ls`/`find` **stat-enrich** to `file-info`, `grep -n` → `grep-match` (file/line/text), `cat`, `git status --porcelain`, `ps`, `lsblk -J` **JSON** → `block-device` |
 | `src/pipeline.lisp`, `exec.lisp` | 4 | `pipe` macro, plumbing/fusion compiler, pump threads, stderr drainers, `pipeline-result`, cancellation |
 | `src/jobs.lisp` | 5 | Job objects, fg/bg, C-z, job events, `debug-job` cross-thread conditions |
 | `src/surface.lisp` | 6 | Reader sugar, prompt function, history, completion, aliases |

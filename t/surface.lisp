@@ -360,7 +360,9 @@ name the shell's own vocabulary unqualified — pipe, pipeline-collect, external
     (with-open-file (s (merge-pathnames "in.txt" dir) :direction :output)
       (write-line "keep me" s) (write-line "drop" s))
     (let ((*current-directory* dir))
-      (is (equal '("keep me") (shell-eval "grep keep < in.txt"))))))
+      ;; grep is rewritten to -n, so it yields a grep-match (line 1, "keep me")
+      (is (equal '("keep me")
+                 (mapcar #'grep-match-text (shell-eval "grep keep < in.txt")))))))
 
 (test redirect-stderr-to-file
   (let ((dir (make-temp-dir)))

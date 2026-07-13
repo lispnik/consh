@@ -71,10 +71,12 @@ between them (SPEC §3)."
              (pipeline-collect (make-pipeline (list (emit-lines-cmd "a" "b" "c")))))))
 
 (test external-to-external-filters
+  ;; grep is the tail: rewritten to -n, it yields grep-match objects
   (is (equal '("foo" "foobar")
-             (pipeline-collect
-              (make-pipeline (list (emit-lines-cmd "foo" "bar" "foobar")
-                                   (external "grep" "foo")))))))
+             (mapcar #'grep-match-text
+                     (pipeline-collect
+                      (make-pipeline (list (emit-lines-cmd "foo" "bar" "foobar")
+                                           (external "grep" "foo"))))))))
 
 (test external-to-external-uses-one-pipe-no-lisp-traffic
   "Acceptance: an external→external pair costs exactly one parse pump (the tail).
@@ -83,7 +85,8 @@ If bytes were routed through Lisp between them there would be a second pump."
                                               (external "grep" "foo"))))))
     (unwind-protect
          (progn
-           (is (equal '("foo" "foobar") (seq-collect (pipeline-result-seq r))))
+           (is (equal '("foo" "foobar")
+                      (mapcar #'grep-match-text (seq-collect (pipeline-result-seq r)))))
            (is (= 1 (pipeline-result-pump-count r)))    ; only the tail parse
            (is (= 2 (length (pipeline-result-processes r)))))
       (consh::%teardown (pipeline-result-state r)))))
@@ -257,11 +260,14 @@ naming that stage."
                                    (mapcat-stage (lambda (s) (list s s)))))))))
 
 (test lisp-to-external-via-input
-  "A Lisp object list is unparsed into an external's stdin."
-  (is (equal '("foo" "boo")
-             (pipeline-collect
-              (run-pipeline (make-pipeline (list (external "grep" "o")))
-                            :input (list "foo" "bar" "boo"))))))
+  "A Lisp object list is unparsed into an external's stdin; grep (rewritten to
+-n) hands the matches back as grep-match objects."
+  (let ((matches (pipeline-collect
+                  (run-pipeline (make-pipeline (list (external "grep" "o")))
+                                :input (list "foo" "bar" "boo")))))
+    (is (every (lambda (m) (typep m 'grep-match)) matches))
+    (is (equal '("foo" "boo") (mapcar #'grep-match-text matches)))
+    (is (equal '(1 3) (mapcar #'grep-match-line-number matches)))))   ; input lines
 
 (test lisp-only-pipeline-with-input
   (is (equal '(2 4 6)
@@ -545,7 +551,9 @@ consumes it correctly: find | grep still works (find is not -print0'd here)."
                     (make-pipeline (list (external "find" (namestring dir) "-type" "f")
                                          (external "grep" "log"))))))
       (is (= 1 (length matches)))
-      (is (search "keep.log" (first matches))))))
+      ;; grep is the tail: rewritten to -n, it yields a grep-match object
+      (is (typep (first matches) 'grep-match))
+      (is (search "keep.log" (grep-match-text (first matches)))))))
 
 ;;; ===========================================================================
 ;;; Imperative stages: emit-stage (transform) and generator-stage (source)

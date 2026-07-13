@@ -265,6 +265,65 @@ enriched."
   (is (subtypep 'command-failed 'error)))
 
 ;;; ---------------------------------------------------------------------------
+;;; grep enrichment: -n output -> grep-match objects
+;;; ---------------------------------------------------------------------------
+
+(test grep-rewrite-adds-line-numbers
+  ;; stdin grep: -n only
+  (is (equal '("-n" "foo")
+             (invocation-arguments (rewrite-invocation (make-invocation "grep" "foo")))))
+  ;; grepping a named file: -H too, so the filename column is always present
+  (is (equal '("-H" "-n" "foo" "a.txt")
+             (invocation-arguments
+              (rewrite-invocation (make-invocation "grep" "foo" "a.txt")))))
+  ;; -n already present: not re-added, but -H still is (for the file column)
+  (is (equal '("-H" "-n" "foo" "a.txt")
+             (invocation-arguments
+              (rewrite-invocation (make-invocation "grep" "-n" "foo" "a.txt")))))
+  ;; fully idempotent once both -H and -n are present
+  (let ((inv (make-invocation "grep" "-H" "-n" "foo" "a.txt")))
+    (is (eq inv (rewrite-invocation inv))))
+  ;; a non-line output mode is left entirely alone (no enrichment)
+  (dolist (mode '("-c" "-l" "-o" "-q"))
+    (let ((inv (make-invocation "grep" mode "foo")))
+      (is (eq inv (rewrite-invocation inv)))))
+  ;; ...even bundled with other short flags (-rc)
+  (let ((inv (make-invocation "grep" "-rc" "foo")))
+    (is (eq inv (rewrite-invocation inv)))))
+
+(test grep-parses-line-numbered-output-without-filename
+  (let* ((inv (make-invocation "grep" "-n" "o"))       ; -n present -> enriches
+         (ms (seq-collect (parse-output inv (string-stream-of "1:foo" "3:boo")))))
+    (is (every (lambda (m) (typep m 'grep-match)) ms))
+    (is (equal '(1 3) (mapcar #'grep-match-line-number ms)))
+    (is (equal '("foo" "boo") (mapcar #'grep-match-text ms)))
+    (is (every #'null (mapcar #'grep-match-file ms)))))
+
+(test grep-parses-file-line-text-and-keeps-colons-in-text
+  (let* ((inv (make-invocation "grep" "-n" "-H" "x" "a.txt"))
+         (ms (seq-collect
+              (parse-output inv (string-stream-of "a.txt:7:time is 12:30"
+                                                  "src/b.c:2:a:b:c")))))
+    (destructuring-bind (a b) ms
+      (is (string= "a.txt" (grep-match-file a)))
+      (is (= 7 (grep-match-line-number a)))
+      (is (string= "time is 12:30" (grep-match-text a)))   ; colons in text kept
+      (is (string= "src/b.c" (grep-match-file b)))
+      (is (= 2 (grep-match-line-number b)))
+      (is (string= "a:b:c" (grep-match-text b))))))
+
+(test grep-without-line-numbers-stays-string-lines
+  "A raw grep invocation (no -n) uses the default string-lines parse; only the
+executor's rewrite turns on enrichment."
+  (let ((inv (make-invocation "grep" "foo")))
+    (is (equal '("m1" "m2")
+               (seq-collect (parse-output inv (string-stream-of "m1" "m2")))))))
+
+(test grep-malformed-line-signals
+  (signals parse-error
+    (consh::%parse-grep-line (make-invocation "grep" "-n" "x") "no-colon-here")))
+
+;;; ---------------------------------------------------------------------------
 ;;; unparse-input
 ;;; ---------------------------------------------------------------------------
 
