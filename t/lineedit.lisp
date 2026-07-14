@@ -223,6 +223,24 @@
     ;; "pwd" is a builtin; whatever the PATH adds, completion keeps the pw prefix
     (is (eql 0 (search "pw" (ledit-text ed))))))
 
+(test tab-cycles-through-candidates
+  (let ((dir (make-temp-dir)))
+    (dolist (n '("aa1" "aa2"))
+      (with-open-file (s (merge-pathnames n dir) :direction :output) (write-string "x" s)))
+    (let ((*current-directory* dir) (ed (make-ledit)))
+      (type-string ed "cat a")
+      ;; first Tab: fills the common prefix and offers the list
+      (let ((first (ledit-key ed :tab)))
+        (is (consp first))
+        (is (eq :show (car first)))
+        (is (string= "cat aa" (ledit-text ed))))
+      ;; subsequent Tabs cycle through the candidates and wrap
+      (ledit-key ed :tab) (is (string= "cat aa1" (ledit-text ed)))
+      (ledit-key ed :tab) (is (string= "cat aa2" (ledit-text ed)))
+      (ledit-key ed :tab) (is (string= "cat aa1" (ledit-text ed)))
+      ;; typing breaks the cycle: a fresh Tab context
+      (type-string ed "!") (is (string= "cat aa1!" (ledit-text ed))))))
+
 ;;; ===========================================================================
 ;;; Key dispatch actions and helpers
 ;;; ===========================================================================

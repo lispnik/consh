@@ -325,6 +325,31 @@ name the shell's own vocabulary unqualified — pipe, pipeline-collect, external
     (let ((*current-directory* dir))
       (is (member "zzfile" (complete-line "cat zz") :test #'string=)))))
 
+(test complete-command-includes-aliases
+  (let ((*aliases* (make-hash-table :test 'equal)))
+    (define-alias "zzalias" "ls -l")
+    (is (member "zzalias" (complete :command "zz") :test #'string=))
+    (is (member "zzalias" (complete-line "zz") :test #'string=))))
+
+(test complete-env-var-names
+  (sb-posix:setenv "CONSH_TEST_ZZVAR" "1" 1)
+  (unwind-protect
+       (progn
+         (is (member "CONSH_TEST_ZZVAR" (complete :env "CONSH_TEST_ZZ") :test #'string=))
+         ;; $-led tokens complete to $-prefixed names via complete-line
+         (is (member "$CONSH_TEST_ZZVAR" (complete-line "echo $CONSH_TEST_ZZ")
+                     :test #'string=)))
+    (ignore-errors (sb-posix:unsetenv "CONSH_TEST_ZZVAR"))))
+
+(test complete-path-expands-leading-tilde
+  ;; a directory under $HOME completes with the ~ kept in the result
+  (let ((probe (merge-pathnames "consh-tildecomp-XYZ/" (user-homedir-pathname))))
+    (unwind-protect
+         (progn (ensure-directories-exist probe)
+                (is (member "~/consh-tildecomp-XYZ/"
+                            (complete :path "~/consh-tildecomp-XY") :test #'string=)))
+      (ignore-errors (uiop:delete-directory-tree (truename probe) :validate t)))))
+
 ;;; ===========================================================================
 ;;; $VAR / ${VAR} environment expansion
 ;;; ===========================================================================

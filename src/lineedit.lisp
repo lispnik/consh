@@ -103,7 +103,13 @@ or unreadable file is ignored.  Returns the resulting entry count."
   (sindex nil)                           ; history index of the current match
   (sfailed nil)                          ; T when the query matches nothing
   (sorig-text "" :type string)           ; line to restore if the search is cancelled
-  (sorig-point 0 :type fixnum))
+  (sorig-point 0 :type fixnum)
+  ;; Tab-completion cycling state (repeated Tab cycles the candidate list)
+  (comp-list nil)                        ; candidates remembered from the last Tab
+  (comp-idx nil)                         ; NIL = showing common prefix, else cycle index
+  (comp-start 0 :type fixnum)            ; token start of the last completion
+  (comp-point 0 :type fixnum)            ; point right after the last completion
+  (comp-token "" :type string))          ; token text left by the last completion
 
 (defun make-ledit (&optional (history *line-history*))
   (%make-ledit :history (coerce history 'vector)))
@@ -307,23 +313,54 @@ separator)."
                        text :end point :from-end t)
           -1)))
 
+(defun %completion-repeat-p (ed start point token)
+  "True when this Tab immediately follows a prior completion at the same spot —
+the signal to cycle to the next candidate instead of completing afresh."
+  (and (ledit-comp-list ed)
+       (eql start (ledit-comp-start ed))
+       (eql point (ledit-comp-point ed))
+       (string= token (ledit-comp-token ed))))
+
+(defun %set-completion-anchor (ed start point token list idx)
+  (setf (ledit-comp-start ed) start (ledit-comp-point ed) point
+        (ledit-comp-token ed) token (ledit-comp-list ed) list (ledit-comp-idx ed) idx))
+
+(defun %clear-completion (ed)
+  (setf (ledit-comp-list ed) nil (ledit-comp-idx ed) nil))
+
 (defun ledit-complete (ed)
-  "Tab: complete the token before point.  Returns :redraw, or (:show . LIST) when
-several candidates remain (the driver lists them)."
+  "Tab: complete the token before point.  A unique candidate is inserted with a
+trailing space; several candidates fill in their common prefix and are listed
+via (:show . LIST); pressing Tab again then cycles through them."
   (let* ((text (ledit-text ed)) (point (ledit-point ed))
          (start (%token-start text point))
-         (token (subseq text start point))
-         (comps (complete-line (subseq text 0 point))))
+         (token (subseq text start point)))
     (flet ((replace-token (with move-extra)
              (setf (ledit-text ed) (concatenate 'string (subseq text 0 start) with
                                                 (subseq text point))
                    (ledit-point ed) (+ start (length with) move-extra))))
       (cond
-        ((null comps) :redraw)
-        ((= 1 (length comps)) (replace-token (concatenate 'string (first comps) " ") 0) :redraw)
-        (t (let ((lcp (%common-prefix comps)))
-             (when (> (length lcp) (length token)) (replace-token lcp 0)))
-           (cons :show comps))))))
+        ;; a repeat Tab: cycle to the next remembered candidate
+        ((%completion-repeat-p ed start point token)
+         (let* ((list (ledit-comp-list ed))
+                (idx  (if (ledit-comp-idx ed) (mod (1+ (ledit-comp-idx ed)) (length list)) 0))
+                (cand (nth idx list)))
+           (replace-token cand 0)
+           (%set-completion-anchor ed start (+ start (length cand)) cand list idx)
+           :redraw))
+        ;; a fresh completion
+        (t (let ((comps (complete-line (subseq text 0 point))))
+             (cond
+               ((null comps) (%clear-completion ed) :redraw)
+               ((= 1 (length comps))
+                (replace-token (concatenate 'string (first comps) " ") 0)
+                (%clear-completion ed) :redraw)
+               (t (let* ((lcp (%common-prefix comps))
+                         (new-token (if (> (length lcp) (length token)) lcp token)))
+                    (when (> (length lcp) (length token)) (replace-token lcp 0))
+                    (%set-completion-anchor ed start (+ start (length new-token))
+                                            new-token comps nil)
+                    (cons :show comps))))))))))
 
 ;;; --- Key dispatch (the driver feeds keys here) ----------------------------
 
