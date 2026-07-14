@@ -60,20 +60,23 @@ method per object type; `table` consults the first row's type.")
         ((pathnamep value) (namestring value))
         (t (princ-to-string value))))
 
-(defun %table-print-row (stream cells widths aligns)
-  (let ((parts (loop for cell in cells and w in widths and al in aligns
-                     collect (if (eq al :right)
-                                 (format nil "~V@A" w cell)
-                                 (format nil "~VA" w cell)))))
-    ;; right-trim so a left-aligned final column leaves no trailing padding
-    (write-string (string-right-trim '(#\Space) (format nil "~{~A~^  ~}" parts)) stream)
+(defun %table-print-row (stream cells widths aligns &optional bold)
+  (let* ((parts (loop for cell in cells and w in widths and al in aligns
+                      collect (if (eq al :right)
+                                  (format nil "~V@A" w cell)
+                                  (format nil "~VA" w cell))))
+         ;; right-trim so a left-aligned final column leaves no trailing padding
+         (line  (string-right-trim '(#\Space) (format nil "~{~A~^  ~}" parts))))
+    (write-string (if bold (format nil "~C[1m~A~C[0m" #\Escape line #\Escape) line)
+                  stream)
     (terpri stream)))
 
-(defun table (objects &key (stream *standard-output*) columns)
+(defun table (objects &key (stream *standard-output*) columns color)
   "Print OBJECTS (a list, or a single object) as an aligned text table, using
 their TABLE-COLUMNS or an explicit COLUMNS spec (a (header . accessor) list).
-Numeric columns right-align.  Returns no values, so it reads cleanly as the last
-form at the REPL."
+Numeric columns right-align.  When COLOR is true, the header and rule are emitted
+bold (for a terminal).  Returns no values, so it reads cleanly as the last form
+at the REPL."
   (let ((objects (if (listp objects) objects (list objects))))
     (when objects
       (let* ((specs     (or columns (table-columns (first objects))))
@@ -89,7 +92,7 @@ form at the REPL."
                               collect (if (every (lambda (o) (numberp (funcall a o))) objects)
                                           :right :left)))
              (rules     (mapcar (lambda (w) (make-string w :initial-element #\-)) widths)))
-        (%table-print-row stream headers widths aligns)
-        (%table-print-row stream rules   widths aligns)
+        (%table-print-row stream headers widths aligns color)
+        (%table-print-row stream rules   widths aligns color)
         (dolist (r rows) (%table-print-row stream r widths aligns)))))
   (values))

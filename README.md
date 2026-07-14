@@ -161,15 +161,23 @@ tools with native ones without changing call sites:
 Adding a wrapper is just `defmethod`s — no change to the shell core.
 
 A **presentation layer** renders any object stream as an aligned table; each
-wrapped type advertises its columns via the `table-columns` generic:
+wrapped type advertises its columns via the `table-columns` generic. This is the
+**default** at the prompt: a bare `ls` (or `df`, `git status`, `ps`, …) whose
+result is a uniform stream of one wrapped type auto-tabulates, with a bold header
+on a terminal — no explicit `table` call needed. A mixed or unwrapped stream
+(e.g. `echo hi`) keeps the plain one-per-line rendering, and a scalar prints
+readably.
 
 ```lisp
-(table (pipeline-collect (pipe (ls))))
+consh> ls
 NAME        SIZE  OWNER
 ----------  ----  --------
 kernel.img  4096  mkennedy
 notes.txt     14  mkennedy      ; numeric columns right-align automatically
 ```
+
+`table` is still there when you want to force it, override columns, or tabulate
+mid-expression: `(table objs :columns '(("SZ" . file-size)))`.
 
 
 ## Pipelines

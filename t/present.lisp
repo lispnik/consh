@@ -51,3 +51,59 @@
     (is (search "SZ" out))
     (is (search "10" out))
     (is (not (search "NAME" out)))))
+
+(test table-color-bolds-header-and-rule-only
+  (let ((out (with-output-to-string (s)
+               (table (list (%fi "a" 1 "u")) :stream s :color t))))
+    ;; header + rule wrapped in bold SGR; the data row is not
+    (is (search (format nil "~C[1mNAME" #\Escape) out))
+    (is (search (format nil "~C[1m----" #\Escape) out))
+    (is (not (search (format nil "~C[1ma " #\Escape) out)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Presentation policy: PRESENT / %TABULAR-RESULT-P
+;;; ---------------------------------------------------------------------------
+
+(test tabular-result-p-recognizes-uniform-wrapped-streams
+  ;; a wrapped type, singly or as a uniform list
+  (is-true  (consh::%tabular-result-p (%fi "a" 1 "u")))
+  (is-true  (consh::%tabular-result-p (list (%fi "a" 1 "u") (%fi "b" 2 "u"))))
+  ;; bare values are not tabular — they keep the plain rendering
+  (is-false (consh::%tabular-result-p (list "a" "b")))
+  (is-false (consh::%tabular-result-p "hi"))
+  (is-false (consh::%tabular-result-p 42))
+  ;; a mixed stream falls back (first is wrapped, rest is not the same class)
+  (is-false (consh::%tabular-result-p (list (%fi "a" 1 "u") "plain")))
+  ;; empty and degenerate inputs are safe (never a table, never an error)
+  (is-false (consh::%tabular-result-p '()))
+  (is-false (consh::%tabular-result-p (cons 1 2))))
+
+(test present-auto-tables-a-wrapped-stream
+  (let ((out (with-output-to-string (s)
+               (present (list (%fi "kernel.img" 4096 "mk") (%fi "notes.txt" 14 "mk")) s))))
+    (is (search "NAME" out))
+    (is (search "kernel.img  4096" out))
+    ;; no bold escapes when *present-color* is off (the test default)
+    (is (not (find #\Escape out)))))
+
+(test present-prints-strings-one-per-line-unquoted
+  (let ((out (with-output-to-string (s) (present (list "hello" "world") s))))
+    (is (string= (format nil "hello~%world~%") out))))
+
+(test present-mixed-stream-stays-per-line
+  (let ((out (with-output-to-string (s) (present (list (%fi "a" 1 "u") "plain") s))))
+    (is (not (search "NAME" out)))            ; not tabulated
+    (is (search "FILE-INFO" out))             ; printed via print-object
+    (is (search "plain" out))))
+
+(test present-empty-list-prints-nothing
+  (is (string= "" (with-output-to-string (s) (present '() s)))))
+
+(test present-scalar-prints-readably
+  (is (string= (format nil "~S~%" "hi") (with-output-to-string (s) (present "hi" s))))
+  (is (string= (format nil "42~%")      (with-output-to-string (s) (present 42 s)))))
+
+(test present-color-flag-bolds-the-header
+  (let ((consh::*present-color* t))
+    (let ((out (with-output-to-string (s) (present (list (%fi "a" 1 "u")) s))))
+      (is (search (format nil "~C[1mNAME" #\Escape) out)))))

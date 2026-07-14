@@ -115,7 +115,7 @@
    #:du-invocation #:du-entry #:du-entry-blocks #:du-entry-path
    #:sed-invocation #:date-invocation
    ;; presentation layer
-   #:table #:table-columns
+   #:table #:table-columns #:present #:*present-color*
    ;; ---- Phase 4: pipeline compiler + executor ----
    #:runnable-seq
    ;; stage + pipeline objects

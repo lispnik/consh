@@ -307,11 +307,6 @@ Returns the line string, or NIL on EOF."
 ;;; The REPL
 ;;; ---------------------------------------------------------------------------
 
-(defun %present (result out)
-  (if (listp result)
-      (dolist (x result) (format out "~&~A~%" x))
-      (format out "~&~S~%" result)))
-
 (defun %read-repl-line (prompt interactive in out)
   (if interactive
       (read-line-edited prompt :in in :out out)
@@ -322,7 +317,8 @@ Returns the line string, or NIL on EOF."
 line editor (Tab completion, Up/Down history, Emacs-ish keys); otherwise plain
 READ-LINE.  Reports pending job events before each prompt.  Ctrl-C aborts the
 line (or, mid-command, tears the job down); Ctrl-D / EOF ends the loop."
-  (let ((interactive (interactive-terminal-p in)))
+  (let ((interactive (interactive-terminal-p in))
+        (*present-color* (interactive-terminal-p in)))  ; bold table headers on a tty
     (loop
       (dolist (event (take-job-events)) (format out "~&[~A]~%" event))
       (let ((line (handler-case (%read-repl-line (prompt) interactive in out)
@@ -335,7 +331,7 @@ line (or, mid-command, tears the job down); Ctrl-D / EOF ends the loop."
         (unless (zerop (length (string-trim '(#\Space #\Tab) line)))
           (record-line line)
           (setf *last-status* 0)               ; a foreground pipeline overrides this
-          (handler-case (%present (shell-eval line) out)
+          (handler-case (present (shell-eval line) out)
             (shell-exit (c) (return (shell-exit-code c)))
             (sb-sys:interactive-interrupt () (setf *last-status* 130) (format out "~&^C~%"))
             (error (e) (setf *last-status* 1) (format out "~&Error: ~A~%" e))))))))

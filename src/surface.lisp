@@ -789,6 +789,56 @@ replace *prompt-function* to build richer prompts from the PROMPT-* helpers."
 (defun prompt () (funcall *prompt-function*))
 
 ;;; ---------------------------------------------------------------------------
+;;; Presentation policy: how a REPL result is displayed
+;;; ---------------------------------------------------------------------------
+;;;
+;;; A stream of a wrapped object type (file-info, grep-match, filesystem, ...)
+;;; renders as an aligned table by default — the presentation layer's `table`,
+;;; which the user would otherwise have to invoke by hand.  Anything else keeps
+;;; the plain per-line / readable rendering, so `echo hi` still prints `hi` and a
+;;; bare Lisp value prints readably.
+
+(defvar *present-color* nil
+  "When true, PRESENT emits table headers bold.  The REPL sets it from terminal
+interactivity; bound off for pipes and tests so output stays plain.")
+
+(defun %proper-list-p (x)
+  "True when X is a proper (non-dotted, non-circular) list."
+  (and (listp x) (ignore-errors (list-length x) t)))
+
+(defun %specialized-columns-p (object)
+  "True when OBJECT's type has a TABLE-COLUMNS method more specific than the T
+fallback — i.e. it is a wrapped type worth tabulating, not a bare string/number."
+  (let ((methods (sb-mop:compute-applicable-methods #'table-columns (list object))))
+    (and methods
+         (not (eq (first (sb-mop:method-specializers (first methods)))
+                  (find-class t))))))
+
+(defun %tabular-result-p (result)
+  "True when RESULT should render as a table: a single specialized object, or a
+non-empty proper list whose elements are all the same specialized class (a mixed
+or unwrapped stream stays per-line)."
+  (typecase result
+    (null nil)
+    (cons (and (%proper-list-p result)
+               (%specialized-columns-p (first result))
+               (let ((class (class-of (first result))))
+                 (every (lambda (x) (eq (class-of x) class)) (rest result)))))
+    (t (%specialized-columns-p result))))
+
+(defun present (result &optional (out *standard-output*))
+  "Display a REPL RESULT to OUT.  A uniform stream of a wrapped object type
+renders as an aligned table (bold header when *PRESENT-COLOR*); any other list
+prints one element per line; a scalar prints readably.  Returns no values."
+  (cond
+    ((%tabular-result-p result)
+     (table result :stream out :color *present-color*))
+    ((and (listp result) (%proper-list-p result))
+     (dolist (x result) (format out "~&~A~%" x)))
+    (t (format out "~&~S~%" result)))
+  (values))
+
+;;; ---------------------------------------------------------------------------
 ;;; Completion (SPEC §1: completion is a generic function)
 ;;; ---------------------------------------------------------------------------
 
