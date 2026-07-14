@@ -124,12 +124,17 @@ colours never shift the cursor.
       (lambda ()
         (let ((branch (prompt-git-branch))
               (status (prompt-exit-status)))
-          (format nil "~A~@[ ~A~]~A> "
+          (format nil "~A~@[ ~A~]~@[~A~]> "
                   (colorize (prompt-cwd) :bright-blue t)
                   (and branch (colorize (format nil "(~A)" branch) :green))
                   (unless (string= status "")
                     (colorize (format nil " [~A]" status) :red t))))))
 ```
+
+<p align="center">
+  <img src="assets/prompt-demo.gif" width="760"
+       alt="A consh session with a customized prompt: a bold-blue current directory and a green git branch read from .git/HEAD. `ls` returns file objects and `(table …)` renders them as an aligned grid; a Lisp `:filter` predicate keeps only the file over 1000 bytes. After `false` the prompt gains a red [1] marker that clears on the next success. `cd src` tracks the directory, `cd /tmp` makes the branch segment vanish outside the repo, and `cd -` brings it back.">
+</p>
 
 
 ## The idea: objects, not bytes

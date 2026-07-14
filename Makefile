@@ -12,7 +12,7 @@ REGISTRY   := (asdf:initialize-source-registry (list :source-registry (list :tre
 
 SOURCES := consh.asd $(wildcard src/*.lisp) $(wildcard src/wrappers/*.lisp)
 
-.PHONY: all build deps test demo clean
+.PHONY: all build deps test demo prompt-demo clean
 
 all: consh
 
@@ -41,6 +41,10 @@ test:
 ## re-record assets/demo.gif from assets/demo.exp (needs expect, asciinema, agg)
 demo: consh
 	./assets/record-demo.sh
+
+## re-record assets/prompt-demo.gif from assets/prompt-demo.py (needs python3, agg)
+prompt-demo: consh
+	./assets/record-prompt-demo.sh
 
 ## remove the built image
 clean:
