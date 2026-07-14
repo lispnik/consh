@@ -136,6 +136,33 @@ colours never shift the cursor.
        alt="A consh session with a customized prompt: a bold-blue current directory and a green git branch read from .git/HEAD. `ls` returns file objects and `(table …)` renders them as an aligned grid; a Lisp `:filter` predicate keeps only the file over 1000 bytes. After `false` the prompt gains a red [1] marker that clears on the next success. `cd src` tracks the directory, `cd /tmp` makes the branch segment vanish outside the repo, and `cd -` brings it back.">
 </p>
 
+### Interactive editing
+
+The line editor is Emacs-ish and does the things a daily-driver shell should:
+
+- **Editing keys** — `^A/^E` (line start/end), `^K/^U` (kill to end / whole line),
+  `^W` (kill word back), `M-d` (kill word forward), `M-b/M-f` (word motion),
+  `^Y` (yank from the kill-ring), `^T` (transpose), `^L` (clear screen), arrows,
+  Home/End.
+- **History** — Up/Down browse it, `^R` is incremental reverse-search, and it
+  **persists** to `<config>/consh/history` across sessions.
+- **Autosuggestions** — as you type, the tail of the most recent matching history
+  entry is shown dim; Right or End accepts it. (`*autosuggest*`)
+- **Syntax highlighting** — the command word is green when it resolves and red
+  when it doesn't, strings yellow, operators and `$VAR`s cyan. (`*highlight*`)
+- **Tab completion** — commands (builtins, aliases, wrappers, `$PATH`), Lisp
+  symbols after `,`/`(`, `$VAR` environment names, and `~/`-relative paths;
+  press Tab again to cycle through the candidates.
+- **Multi-line input** — an unclosed `(` form or an open quote drops to a `...>`
+  continuation prompt until the input is complete.
+
+### Builtins & navigation
+
+`cd` (with `~`, `-`, and `$CDPATH`), `pushd`/`popd`/`dirs`, and **auto-cd** (a
+bare directory name changes into it). `help` lists the builtins, `type`/`which`
+say how a name resolves, and `source` (or `.`) runs a file of shell lines. `~`
+and `~user` expand in arguments, so `cat ~/notes` works.
+
 
 ## The idea: objects, not bytes
 
