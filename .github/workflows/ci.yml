@@ -108,8 +108,10 @@ jobs:
             out=$(printf 'echo image works\nseq 1 3 | grep 2\n(+ 40 2)\n' | ./consh)
             echo "$out"
             echo "$out" | grep -q "image works" || return 1
-            # grep is a wrapper: `seq | grep` yields a grep-match object, not "2".
-            echo "$out" | grep -q 'GREP-MATCH 2 "2"' || return 1
+            # grep is a wrapper: `seq | grep` yields a grep-match object stream,
+            # which the default presentation renders as a FILE/LINE/TEXT table.
+            echo "$out" | grep -q 'LINE  TEXT' || return 1
+            echo "$out" | grep -q '2  2' || return 1
             echo "$out" | grep -q "^42$" || return 1
           }
           for attempt in 1 2 3; do
