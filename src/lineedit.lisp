@@ -240,6 +240,35 @@ chars back."
           (progn (incf (ledit-hidx ed)) (%ledit-set-line ed (aref h (ledit-hidx ed))))
           (progn (setf (ledit-hidx ed) nil) (%ledit-set-line ed (ledit-stash ed)))))))
 
+;;; --- autosuggestions (fish-style ghost text) -----------------------------
+
+(defvar *autosuggest* t
+  "When true, the line editor shows a dim suggestion — the tail of the most
+recent history entry that extends what you've typed — which Right/End accepts.")
+
+(defun %ledit-suggestion (ed)
+  "The autosuggestion suffix for ED: the tail of the newest history entry that
+strictly extends the current text, or NIL.  Only offered when point is at end of
+the line and no other sub-mode is active."
+  (let ((text (ledit-text ed)))
+    (when (and *autosuggest*
+               (not (ledit-searching ed))
+               (plusp (length text))
+               (= (ledit-point ed) (length text)))
+      (let ((h (ledit-history ed)))
+        (loop for i from (1- (length h)) downto 0
+              for cand = (aref h i)
+              when (and (> (length cand) (length text))
+                        (string= text cand :end2 (length text)))
+                return (subseq cand (length text)))))))
+
+(defun ledit-accept-suggestion (ed)
+  "If a suggestion is showing, append it and jump to end; return T when it did."
+  (let ((s (%ledit-suggestion ed)))
+    (when s
+      (%ledit-set-line ed (concatenate 'string (ledit-text ed) s))
+      t)))
+
 ;;; --- reverse incremental search (^R) -------------------------------------
 
 (defun %history-search-backward (history query before-index)
@@ -388,9 +417,9 @@ via (:show . LIST); pressing Tab again then cycles through them."
         (:backspace   (ledit-backspace ed) :redraw)
         (:delete      (ledit-delete ed) :redraw)
         (:left        (ledit-left ed) :redraw)
-        (:right       (ledit-right ed) :redraw)
+        (:right       (unless (ledit-accept-suggestion ed) (ledit-right ed)) :redraw)
         (:home        (ledit-home ed) :redraw)
-        (:end         (ledit-end ed) :redraw)
+        (:end         (unless (ledit-accept-suggestion ed) (ledit-end ed)) :redraw)
         (:kill-to-end (ledit-kill-to-end ed) :redraw)
         (:kill-line   (ledit-kill-line ed) :redraw)
         (:kill-word-back    (ledit-kill-word-back ed) :redraw)
@@ -550,12 +579,17 @@ signal-interrupted syscalls when FD is given."
     w))
 
 (defun %redraw (ed prompt out)
-  "Repaint the prompt + line and place the cursor, using ANSI escapes."
-  (format out "~C[2K~C~A~A" #\Escape #\Return prompt (ledit-text ed))   ; clear line, home, prompt+text
-  ;; column = visible prompt width + point (1-based); %display-width so ANSI
-  ;; color escapes in the prompt do not skew the cursor position
-  (format out "~C[~DG" #\Escape (+ 1 (%display-width prompt) (ledit-point ed)))
-  (finish-output out))
+  "Repaint the prompt + line and place the cursor, using ANSI escapes.  Any
+autosuggestion is drawn dim after the text; the cursor is then placed back before
+it so typing continues at point."
+  (let ((suggestion (%ledit-suggestion ed)))
+    (format out "~C[2K~C~A~A" #\Escape #\Return prompt (ledit-text ed)) ; clear line, home, prompt+text
+    (when suggestion
+      (format out "~C[90m~A~C[0m" #\Escape suggestion #\Escape))        ; dim grey ghost text
+    ;; column = visible prompt width + point (1-based); %display-width so ANSI
+    ;; color escapes in the prompt do not skew the cursor position
+    (format out "~C[~DG" #\Escape (+ 1 (%display-width prompt) (ledit-point ed)))
+    (finish-output out)))
 
 (defun %search-prompt (ed)
   "The transient prompt shown during ^R reverse-search, e.g.

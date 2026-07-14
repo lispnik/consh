@@ -158,6 +158,39 @@
     (ledit-key ed :backspace)                     ; "te"
     (is (string= "make test" (ledit-text ed)))))
 
+;;; ===========================================================================
+;;; Autosuggestions (fish-style ghost text)
+;;; ===========================================================================
+
+(test autosuggestion-offers-newest-history-tail
+  (let ((ed (make-ledit (vector "git status" "git commit -m x"))))
+    (type-string ed "git c")
+    (is (string= "ommit -m x" (consh::%ledit-suggestion ed)))   ; newest matching entry
+    (ledit-key ed :right)                                       ; Right accepts it
+    (is (string= "git commit -m x" (ledit-text ed)))))
+
+(test autosuggestion-only-at-end-and-on-match
+  (let ((ed (make-ledit (vector "hello world"))))
+    (type-string ed "hel")
+    (is (string= "lo world" (consh::%ledit-suggestion ed)))
+    (ledit-key ed :left)                                        ; point no longer at end
+    (is (null (consh::%ledit-suggestion ed))))
+  (let ((ed (make-ledit (vector "abc"))))                       ; no matching history
+    (type-string ed "xyz")
+    (is (null (consh::%ledit-suggestion ed)))))
+
+(test autosuggestion-end-key-accepts
+  (let ((ed (make-ledit (vector "make prompt-demo"))))
+    (type-string ed "make ")
+    (ledit-key ed :end)
+    (is (string= "make prompt-demo" (ledit-text ed)))))
+
+(test autosuggestion-disabled-by-flag
+  (let ((consh::*autosuggest* nil)
+        (ed (make-ledit (vector "hello world"))))
+    (type-string ed "hel")
+    (is (null (consh::%ledit-suggestion ed)))))
+
 (test boundary-moves-are-safe
   (let ((ed (make-ledit)))
     (ledit-key ed :left) (ledit-key ed :backspace) (ledit-key ed :delete) (ledit-key ed :right)
