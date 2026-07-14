@@ -165,6 +165,9 @@
    #:*history* #:record-history #:history-count #:history-ref #:history-form
    #:history-result #:last-result #:clear-history
    #:*prompt-function* #:default-prompt #:prompt
+   ;; prompt building blocks + colour
+   #:*last-status* #:prompt-cwd #:prompt-cwd-base #:prompt-user #:prompt-host
+   #:prompt-git-branch #:prompt-time #:prompt-jobs #:prompt-exit-status #:colorize
    ;; user init file
    #:*load-init-file* #:init-file-path #:load-init-file
    #:complete #:complete-line

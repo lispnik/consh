@@ -104,6 +104,33 @@ builtins. A broken init file is reported and skipped, never blocking startup.
 (setf *prompt-function* (lambda () (format nil "~A> " (pathname-name *current-directory*))))
 ```
 
+### Customizing the prompt
+
+`*prompt-function*` is any zero-argument function returning a string, so the
+prompt is composed from Lisp — no format-string mini-language. Ready-made
+building blocks return the usual segments (all plain functions, no subprocesses):
+`prompt-cwd` / `prompt-cwd-base` (the latter home-abbreviated to `~`),
+`prompt-user`, `prompt-host`, `prompt-git-branch` (reads `.git/HEAD`, `nil`
+outside a repo), `prompt-time`, `prompt-jobs`, and `prompt-exit-status` (empty
+after success, else the code of the last foreground command). `colorize` wraps a
+string in an ANSI SGR colour (`:red`, `:green`, `:bright-blue`, … with an
+optional `bold` flag); the line editor measures the prompt's *visible* width, so
+colours never shift the cursor.
+
+```lisp
+;; A git-aware, coloured prompt: cwd in bold blue, branch in green,
+;; and a red [N] marker only when the last command failed.
+(setf *prompt-function*
+      (lambda ()
+        (let ((branch (prompt-git-branch))
+              (status (prompt-exit-status)))
+          (format nil "~A~@[ ~A~]~A> "
+                  (colorize (prompt-cwd) :bright-blue t)
+                  (and branch (colorize (format nil "(~A)" branch) :green))
+                  (unless (string= status "")
+                    (colorize (format nil " [~A]" status) :red t))))))
+```
+
 
 ## The idea: objects, not bytes
 

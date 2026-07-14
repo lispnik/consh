@@ -29,6 +29,18 @@
     (ledit-key ed :home) (is (= 0 (ledit-point ed)))
     (ledit-key ed :end)  (is (= 3 (ledit-point ed)))))
 
+(test display-width-ignores-ansi-escapes
+  "%DISPLAY-WIDTH counts visible columns, skipping ANSI CSI (colour) sequences —
+   this is what keeps a coloured prompt from misplacing the cursor."
+  (is (= 3 (consh::%display-width "abc")))
+  (is (= 0 (consh::%display-width "")))
+  ;; a colourised string measures as its visible text only
+  (is (= 3 (consh::%display-width (colorize "abc" :red))))
+  (is (= 1 (consh::%display-width (colorize "X" :green t))))
+  ;; multiple embedded sequences
+  (is (= 6 (consh::%display-width
+            (concatenate 'string (colorize "foo" :blue) (colorize "bar" :red))))))
+
 (test backspace-and-delete
   (let ((ed (make-ledit)))
     (type-string ed "abcd")

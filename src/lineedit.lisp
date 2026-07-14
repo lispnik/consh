@@ -252,10 +252,28 @@ signal-interrupted syscalls when FD is given."
       ((< (char-code c) 32) :redraw)
       (t c))))
 
+(defun %display-width (string)
+  "The visible column width of STRING, skipping ANSI CSI escape sequences (ESC `[`
+… final byte 0x40-0x7E) so a colored prompt still positions the cursor correctly
+— a raw (length ...) would count the invisible escape bytes and land too far."
+  (let ((n (length string)) (i 0) (w 0))
+    (loop while (< i n) do
+      (let ((c (char string i)))
+        (cond
+          ((and (char= c #\Escape) (< (1+ i) n) (char= (char string (1+ i)) #\[))
+           (incf i 2)                          ; skip ESC [
+           (loop while (and (< i n) (not (<= 64 (char-code (char string i)) 126)))
+                 do (incf i))                  ; skip parameter/intermediate bytes
+           (when (< i n) (incf i)))            ; skip the final byte
+          (t (incf w) (incf i)))))
+    w))
+
 (defun %redraw (ed prompt out)
   "Repaint the prompt + line and place the cursor, using ANSI escapes."
   (format out "~C[2K~C~A~A" #\Escape #\Return prompt (ledit-text ed))   ; clear line, home, prompt+text
-  (format out "~C[~DG" #\Escape (+ 1 (length prompt) (ledit-point ed))) ; column = prompt+point (1-based)
+  ;; column = visible prompt width + point (1-based); %display-width so ANSI
+  ;; color escapes in the prompt do not skew the cursor position
+  (format out "~C[~DG" #\Escape (+ 1 (%display-width prompt) (ledit-point ed)))
   (finish-output out))
 
 (defun read-line-edited (prompt &key (in *standard-input*) (out *standard-output*))
@@ -316,10 +334,11 @@ line (or, mid-command, tears the job down); Ctrl-D / EOF ends the loop."
         (when (null line) (return))
         (unless (zerop (length (string-trim '(#\Space #\Tab) line)))
           (record-line line)
+          (setf *last-status* 0)               ; a foreground pipeline overrides this
           (handler-case (%present (shell-eval line) out)
             (shell-exit (c) (return (shell-exit-code c)))
-            (sb-sys:interactive-interrupt () (format out "~&^C~%"))
-            (error (e) (format out "~&Error: ~A~%" e))))))))
+            (sb-sys:interactive-interrupt () (setf *last-status* 130) (format out "~&^C~%"))
+            (error (e) (setf *last-status* 1) (format out "~&Error: ~A~%" e))))))))
 
 (defun main ()
   "Entry point for a dumped consh executable: greet, run the REPL, exit cleanly."

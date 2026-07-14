@@ -206,6 +206,86 @@ name the shell's own vocabulary unqualified — pipe, pipeline-collect, external
   (let ((*prompt-function* (lambda () "$$ ")))
     (is (string= "$$ " (prompt)))))
 
+;;; ---------------------------------------------------------------------------
+;;; Prompt building blocks + colour
+;;; ---------------------------------------------------------------------------
+
+(test prompt-cwd-uses-current-directory
+  "PROMPT-CWD-BASE is the final path component; PROMPT-CWD the whole path."
+  (let ((*current-directory* #P"/tmp/consh-cwd-test/deep/"))
+    (is (string= "deep" (prompt-cwd-base)))
+    (is (search "consh-cwd-test/deep" (prompt-cwd)))))
+
+(test prompt-cwd-abbreviates-home
+  "A directory under $HOME is abbreviated with a leading tilde."
+  (let* ((home (user-homedir-pathname))
+         (*current-directory* (merge-pathnames "consh-home-probe/" home)))
+    (is (char= #\~ (char (prompt-cwd) 0)))))
+
+(test prompt-user-and-host-are-nonempty
+  (is (plusp (length (prompt-user))))
+  (is (plusp (length (prompt-host))))
+  ;; host name carries no dotted domain suffix
+  (is (not (find #\. (prompt-host)))))
+
+(test prompt-git-branch-reads-head
+  "PROMPT-GIT-BRANCH resolves the symbolic ref in .git/HEAD, walking upward."
+  (let* ((root (merge-pathnames (format nil "consh-git-~D/" (sb-posix:getpid))
+                                #P"/tmp/"))
+         (sub  (merge-pathnames "a/b/" root))
+         (head (merge-pathnames ".git/HEAD" root)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist head)
+           (ensure-directories-exist sub)
+           (with-open-file (s head :direction :output :if-exists :supersede)
+             (write-string "ref: refs/heads/testbranch" s))
+           ;; found from the repo root and from a nested subdirectory
+           (is (string= "testbranch" (prompt-git-branch root)))
+           (is (string= "testbranch" (prompt-git-branch sub)))
+           ;; a detached HEAD (bare SHA) shortens to 7 chars
+           (with-open-file (s head :direction :output :if-exists :supersede)
+             (write-string "0123456789abcdef0123456789abcdef01234567" s))
+           (is (string= "0123456" (prompt-git-branch root))))
+      (ignore-errors (uiop:delete-directory-tree (truename root)
+                                                 :validate t)))))
+
+(test prompt-git-branch-nil-outside-repo
+  (let ((dir (merge-pathnames (format nil "consh-nogit-~D/" (sb-posix:getpid))
+                              #P"/tmp/")))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist dir)
+           (is (null (prompt-git-branch dir))))
+      (ignore-errors (uiop:delete-directory-tree (truename dir) :validate t)))))
+
+(test prompt-time-is-hh-mm-ss
+  (let ((s (prompt-time)))
+    (is (= 8 (length s)))
+    (is (char= #\: (char s 2)))
+    (is (char= #\: (char s 5)))
+    (is (every (lambda (c) (or (digit-char-p c) (char= c #\:))) s))))
+
+(test prompt-jobs-counts-jobs
+  (is (= (length (all-jobs)) (prompt-jobs))))
+
+(test prompt-exit-status-reflects-last-status
+  (let ((*last-status* 0))
+    (is (string= "" (prompt-exit-status))))
+  (let ((*last-status* 42))
+    (is (string= "42" (prompt-exit-status)))))
+
+(test colorize-wraps-in-sgr
+  "COLORIZE brackets the text with an SGR set and a reset; bold adds the 1; prefix."
+  (let ((red (colorize "abc" :red)))
+    (is (string= (format nil "~C[31mabc~C[0m" #\Escape #\Escape) red))
+    ;; the visible width is unchanged by the escapes
+    (is (= 3 (consh::%display-width red))))
+  (let ((bold (colorize "X" :green t)))
+    (is (string= (format nil "~C[1;32mX~C[0m" #\Escape #\Escape) bold)))
+  ;; an unknown colour passes the text through untouched
+  (is (string= "plain" (colorize "plain" :chartreuse))))
+
 ;;; ===========================================================================
 ;;; Completion is a generic function
 ;;; ===========================================================================

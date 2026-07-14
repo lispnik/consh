@@ -413,18 +413,32 @@ call; everything else desugars to a pipeline run."
             (cons 'list (mapcar #'%stage->form stages))
             :background background))))
 
+(defvar *last-status* 0
+  "Exit status of the most recent foreground command (0 = success).  Set by
+%RUN-FOREGROUND and the REPL; read by PROMPT-EXIT-STATUS.")
+
+(defun %pipeline-exit-status (result)
+  "The exit status of a finished RESULT: 0 when every external succeeded (per each
+wrapper's PARSE-ERROR-OUTPUT, so grep's benign exit 1 stays 0), else the first
+failing stage's status."
+  (let ((failure (%first-failure result)))
+    (if failure (command-failed-status failure) 0)))
+
 (defun %run-foreground (pipeline)
   "Run PIPELINE in the foreground and return its collected output.  On a real
 tty, hand the pipeline's process group the controlling terminal while it runs —
 so keyboard signals (C-c) reach the running command, not the shell, and a command
 reading the tty works — then reclaim the terminal.  A no-op handoff without a tty
-or for a pure-Lisp pipeline (no process group)."
-  (if (not (terminal-job-control-active-p))
-      (pipeline-collect pipeline)
-      (let ((result (run-pipeline pipeline)))
-        (give-terminal-to-pgid (run-state-pgid (pipeline-result-state result)))
-        (unwind-protect (pipeline-collect result)
-          (reclaim-terminal)))))
+or for a pure-Lisp pipeline (no process group).  Records the exit status in
+*LAST-STATUS* for the prompt."
+  (let ((result (run-pipeline pipeline))
+        (interactive (terminal-job-control-active-p)))
+    (when interactive
+      (give-terminal-to-pgid (run-state-pgid (pipeline-result-state result))))
+    (unwind-protect
+         (prog1 (pipeline-collect result)
+           (setf *last-status* (%pipeline-exit-status result)))
+      (when interactive (reclaim-terminal)))))
 
 (defun %shell-run (stages &key background)
   "Run the desugared STAGES: collect output (foreground) or start a job (&)."
@@ -676,11 +690,98 @@ from starting.  Returns the truename loaded, or NIL if there was no file."
 ;;; ---------------------------------------------------------------------------
 ;;; Prompt (SPEC §1: the prompt is a function)
 ;;; ---------------------------------------------------------------------------
+;;;
+;;; The prompt is a function of no arguments returning a string; set
+;;; *prompt-function* (e.g. from ~/.config/consh/consh.lisp) to a lambda composed
+;;; from these building blocks.  Colours via COLORIZE are cursor-safe: the line
+;;; editor measures the prompt's VISIBLE width, skipping ANSI escapes.
+
+(defun prompt-cwd-base (&optional (directory *current-directory*))
+  "The final component of DIRECTORY (like the default prompt), or \"/\" for root."
+  (let ((dir (pathname-directory directory)))
+    (if (and (consp dir) (cdr dir)) (car (last dir)) "/")))
+
+(defun prompt-cwd (&optional (directory *current-directory*))
+  "DIRECTORY as a namestring with the home directory abbreviated to `~`."
+  (let ((path (string-right-trim "/" (namestring directory)))
+        (home (string-right-trim "/" (namestring (user-homedir-pathname)))))
+    (cond ((string= path "") "/")
+          ((string= path home) "~")
+          ((and (> (length path) (length home))
+                (string= home (subseq path 0 (length home)))
+                (char= (char path (length home)) #\/))
+           (concatenate 'string "~" (subseq path (length home))))
+          (t path))))
+
+(let ((cached nil))
+  (defun prompt-user ()
+    "The current user's login name (via getpwuid), memoized — it never changes."
+    (or cached (setf cached (or (ignore-errors (uid-username (sb-posix:getuid))) "?")))))
+
+(defun prompt-host ()
+  "The short hostname (domain stripped)."
+  (let ((h (machine-instance)))
+    (subseq h 0 (or (position #\. h) (length h)))))
+
+(defun %find-git-head (directory)
+  "Walk up from DIRECTORY to a `.git/HEAD`, returning its pathname or NIL."
+  (let ((dir (ignore-errors (truename directory))))
+    (loop while dir do
+      (let ((head (merge-pathnames ".git/HEAD" dir)))
+        (when (probe-file head) (return head)))
+      (let ((up (ignore-errors (truename (merge-pathnames "../" dir)))))
+        (setf dir (and up (not (equal up dir)) up))))))   ; stop at the filesystem root
+
+(defun prompt-git-branch (&optional (directory *current-directory*))
+  "The current git branch (read from `.git/HEAD`, no subprocess), a short SHA when
+detached, or NIL outside a repository."
+  (let ((head (%find-git-head directory)))
+    (when head
+      (let ((line (ignore-errors
+                   (with-open-file (s head :if-does-not-exist nil)
+                     (and s (read-line s nil nil))))))
+        (cond ((or (null line) (zerop (length line))) nil)
+              ((and (>= (length line) 16) (string= "ref: refs/heads/" line :end2 16))
+               (string-trim " " (subseq line 16)))
+              (t (subseq line 0 (min 7 (length line)))))))))   ; detached: short SHA
+
+(defun prompt-time ()
+  "The current wall-clock time as HH:MM:SS."
+  (multiple-value-bind (s m h) (decode-universal-time (get-universal-time))
+    (format nil "~2,'0D:~2,'0D:~2,'0D" h m s)))
+
+(defun prompt-jobs ()
+  "The number of live jobs (for a `[N]` prompt segment)."
+  (length (all-jobs)))
+
+(defun prompt-exit-status ()
+  "The last foreground command's exit status as a string: \"\" on success (0),
+else the code — colorize it in your prompt to taste."
+  (if (zerop *last-status*) "" (princ-to-string *last-status*)))
+
+(defparameter +ansi-colors+
+  '((:black . 30) (:red . 31) (:green . 32) (:yellow . 33) (:blue . 34)
+    (:magenta . 35) (:cyan . 36) (:white . 37)
+    (:bright-black . 90) (:bright-red . 91) (:bright-green . 92)
+    (:bright-yellow . 93) (:bright-blue . 94) (:bright-magenta . 95)
+    (:bright-cyan . 96) (:bright-white . 97))
+  "Prompt colour keyword -> ANSI SGR foreground code.")
+
+(defun colorize (string color &optional bold)
+  "Wrap STRING in the ANSI SGR code for COLOR (a keyword from +ANSI-COLORS+), plus
+bold when BOLD, resetting after.  An unknown COLOR returns STRING unchanged.  The
+line editor measures visible width, so a colorized prompt keeps its cursor
+correct."
+  (let ((code (cdr (assoc color +ansi-colors+))))
+    (if code
+        (format nil "~C[~:[~;1;~]~Dm~A~C[0m" #\Escape bold code string #\Escape)
+        string)))
 
 (defun default-prompt ()
-  (let* ((dir (pathname-directory *current-directory*))
-         (name (if (and (consp dir) (cdr dir)) (car (last dir)) "/")))
-    (format nil "consh ~A> " name)))
+  "consh <cwd-base> [(<git-branch>)]> — showcases the git-branch block; users
+replace *prompt-function* to build richer prompts from the PROMPT-* helpers."
+  (let ((branch (prompt-git-branch)))
+    (format nil "consh ~A~@[ (~A)~]> " (prompt-cwd-base) branch)))
 
 (defvar *prompt-function* #'default-prompt
   "A function of no arguments returning the prompt string.")
