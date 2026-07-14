@@ -149,21 +149,29 @@ were not explicitly dup2'd into."
       (when (/= rc 0)
         (error 'ffi-error :syscall "pipe" :errno errno)))
     (let ((r (cffi:mem-aref fds :int 0))
-          (w (cffi:mem-aref fds :int 1)))
-      (when cloexec
-        (set-cloexec r t)
-        (set-cloexec w t))
-      (values r w))))
+          (w (cffi:mem-aref fds :int 1))
+          (ok nil))
+      ;; If set-cloexec (fcntl) signals, close both ends rather than leak them —
+      ;; the caller never receives the fds and so cannot reclaim them itself.
+      (unwind-protect
+           (progn
+             (when cloexec
+               (set-cloexec r t)
+               (set-cloexec w t))
+             (setf ok t)
+             (values r w))
+        (unless ok
+          (ignore-errors (c-close r))
+          (ignore-errors (c-close w)))))))
 
 (defun c-close (fd)
-  "close(2).  Returns T on success.  EINTR is retried."
-  (multiple-value-bind (rc errno)
-      (call-retrying-eintr
-       (lambda () (with-errno (rc e) (cffi:foreign-funcall "close" :int fd :int)
-                    (values rc e))))
-    (if (= rc 0)
-        t
-        (error 'ffi-error :syscall "close" :errno errno))))
+  "close(2).  Returns T on success.  EINTR is treated as success and NOT retried:
+on Linux and macOS close(2) has already closed the descriptor when it returns
+EINTR, so retrying could close a since-reused fd belonging to another thread."
+  (with-errno (rc errno) (cffi:foreign-funcall "close" :int fd :int)
+    (cond ((= rc 0) t)
+          ((eql errno +eintr+) t)          ; fd is closed; retrying would be wrong
+          (t (error 'ffi-error :syscall "close" :errno errno)))))
 
 (defun set-cloexec (fd on)
   "Set or clear FD_CLOEXEC on FD."

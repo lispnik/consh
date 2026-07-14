@@ -385,7 +385,10 @@ this is just WAIT-JOB (honouring TIMEOUT)."
       (loop
         (multiple-value-bind (output done) (wait-job job :timeout 0.15)
           (when done (return output))
-          (when (%job-stopped-p job)
+          ;; Only treat it as stopped if it has NOT actually completed — a job
+          ;; that finished may briefly still show a :stopped process status
+          ;; (reaper lag); declaring it stopped there would freeze a done job.
+          (when (and (%job-stopped-p job) (not (job-complete-p job)))
             (stop-flag-pause (job-stop-flag job))
             (sb-thread:with-mutex ((job-lock job)) (setf (job-state job) :stopped))
             (%post-event job (format nil "job ~D stopped" (job-id job)))

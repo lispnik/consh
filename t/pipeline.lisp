@@ -751,3 +751,22 @@ state (a running total) — which map/filter/mapcat cannot express."
     ;; generator+uniq fuse; sort stands alone between them -> 3 groups
     (is (= 3 (length groups)))
     (is (every (lambda (g) (eq (car g) :lisp)) groups))))
+
+;;; ===========================================================================
+;;; Worker-guard: a producer error must NOT quit the image (bare pipeline)
+;;; ===========================================================================
+
+(test bare-pipeline-producer-error-is-contained
+  "A serious-condition in a Lisp producer of a bare (job-less) pipeline is
+contained: the worker dies gracefully and the consumer sees EOF, instead of the
+condition reaching the thread top and quitting the whole image.  (If this
+regressed, running this very test would crash the suite.)"
+  (is (null (pipeline-collect
+             (make-pipeline (list (generator-stage
+                                   (lambda (emit) (declare (ignore emit))
+                                     (error "boom in a producer thread")))))))))
+
+(test cat-stage-missing-file-does-not-crash
+  "Native :cat on a nonexistent file must not take down the shell."
+  (is (null (pipeline-collect
+             (pipe (:cat "/consh-no-such-file-xyzzy-42"))))))

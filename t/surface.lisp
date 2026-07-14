@@ -339,6 +339,16 @@ name the shell's own vocabulary unqualified — pipe, pipeline-collect, external
   (signals shell-parse-error (consh::%parse-signal "BOGUS"))
   (signals shell-parse-error (%builtin "kill" '())))
 
+(test kill-illegal-pid-reports-cleanly-and-still-kills-valid-targets
+  "A malformed pid raises a clean shell-parse-error (not a raw parse-integer
+error), and any valid targets before it are still signalled."
+  (signals shell-parse-error (%builtin "kill" '("notapid")))
+  (let ((job (run-job (make-pipeline (list (external "sleep" "30"))) :background t)))
+    (signals shell-parse-error
+      (%builtin "kill" (list (format nil "%~D" (job-id job)) "notapid")))
+    ;; the job was killed before the bad target aborted the builtin
+    (is (eq :done (job-state job)))))
+
 (test builtins-only-dispatch-single-stage-foreground
   ;; `cd` inside a pipeline is NOT a builtin — it desugars to an external stage
   (is (equal '(%shell-run (list (external "cd" "x") (external "cat")) :background nil)

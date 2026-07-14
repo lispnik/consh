@@ -33,15 +33,21 @@ than letting the condition reach the thread top — which, with the debugger
 disabled, would quit the whole image.  The caller's unwind-protect still closes
 the worker's channel, so downstream sees EOF."
   (let ((hook *worker-error-hook*))
-    (if hook
-        (handler-case
+    ;; The handler-case wraps BOTH paths: with a hook, the handler-bind first
+    ;; routes the live condition to the hook (stack/restarts intact); with no
+    ;; hook (a bare foreground pipeline), we still catch here so the worker dies
+    ;; gracefully — never letting the condition reach the thread top, which would
+    ;; quit the whole image.  Either way the caller's unwind-protect closes the
+    ;; channel so downstream sees EOF.
+    (handler-case
+        (if hook
             (handler-bind ((serious-condition
                              (lambda (c)
                                (unless (typep c 'channel-closed)
                                  (funcall hook label c)))))
               (funcall thunk))
-          (serious-condition () nil))
-        (funcall thunk))))
+            (funcall thunk))
+      (serious-condition () nil))))
 
 (defun spawn-stage-thread (function &key name)
   "Start a worker thread running FUNCTION with *SHELL-SPECIALS* rebound to the

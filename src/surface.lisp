@@ -424,12 +424,20 @@ the signal, defaulting to SIGTERM."
   ;; whole process group + threads reclaimed); a bare pid is signalled directly.
   (lambda (args)
     (multiple-value-bind (signal targets) (%parse-kill-args args)
-      (declare (ignorable signal))
       (unless targets (error 'shell-parse-error :line "kill: no target"))
-      (dolist (target targets)
-        (if (%job-ref-p target)
-            (kill-job (%require-job target))
-            (c-kill (parse-integer target) signal)))
+      ;; Signal every target we can; collect the malformed ones and report them
+      ;; once at the end, so one bad pid does not leave the rest un-signalled.
+      (let ((bad '()))
+        (dolist (target targets)
+          (if (%job-ref-p target)
+              (kill-job (%require-job target))
+              (let ((pid (parse-integer target :junk-allowed t)))
+                (if pid
+                    (ignore-errors (c-kill pid signal))
+                    (push target bad)))))
+        (when bad
+          (error 'shell-parse-error
+                 :line (format nil "kill: illegal pid: ~{~A~^ ~}" (nreverse bad)))))
       (values))))
 
 (define-builtin "wait"
