@@ -56,7 +56,16 @@ whole pipeline regardless of which thread does the work."
   (let ((vars *shell-specials*)
         (vals (mapcar #'symbol-value *shell-specials*)))
     (sb-thread:make-thread
-     (lambda () (progv vars vals (funcall function)))
+     (lambda ()
+       (progv vars vals
+         ;; Last-resort net: a stage thread (pump, drainer, worker, sink) must
+         ;; never let an unhandled serious-condition reach the thread top, which
+         ;; — with the debugger disabled — would quit the whole image.  Genuine
+         ;; error routing (parking a worker under a job) happens inside FUNCTION
+         ;; via CALL-WITH-WORKER-GUARD; this only catches what would be fatal
+         ;; (e.g. a drainer whose stream is closed under it during teardown).
+         (handler-case (funcall function)
+           (serious-condition () nil))))
      :name (or name "consh-stage"))))
 
 ;;; ---------------------------------------------------------------------------

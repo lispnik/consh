@@ -32,34 +32,45 @@ usage/\"illegal option\" message (often still exiting 0 on macOS)."
 
 (defun %capture (program args &key (timeout 5))
   "Run PROGRAM with ARGS, returning (values stdout stderr exit-code).  EXIT-CODE
-is NIL if the program could not be spawned.  Both streams are drained
-concurrently so the child cannot block."
-  (let (o-r o-w e-r e-w)
+is NIL if the program could not be spawned.  Both streams are drained in their
+own threads (so neither a child blocking on a full pipe nor a hung child
+blocking our read can wedge us), and a child that outlives TIMEOUT is killed."
+  (let (o-r o-w e-r e-w os es)
     (unwind-protect
-         (progn
-           (setf (values o-r o-w) (make-pipe)
-                 (values e-r e-w) (make-pipe))
-           (handler-case
+         (handler-case
+             (progn
+               (setf (values o-r o-w) (make-pipe)
+                     (values e-r e-w) (make-pipe))
                (let ((proc (launch program args
                                    :file-actions (list (list :dup2 o-w 1)
                                                        (list :dup2 e-w 2)))))
                  (%close-fd-safely o-w) (setf o-w nil)
                  (%close-fd-safely e-w) (setf e-w nil)
-                 (let ((os (sb-sys:make-fd-stream o-r :input t :element-type 'character))
-                       (es (sb-sys:make-fd-stream e-r :input t :element-type 'character)))
-                   (setf o-r nil e-r nil)                 ; owned by the streams now
-                   (let* ((err "")
-                          (drainer (spawn-stage-thread
-                                    (lambda () (setf err (slurp-stream es)))
-                                    :name "consh-probe-stderr")))
-                     (let ((out (slurp-stream os)))
-                       (ignore-errors (sb-thread:join-thread drainer :timeout timeout))
-                       (wait-process proc :timeout timeout)
-                       (ignore-errors (close os))
-                       (ignore-errors (close es))
-                       (values out err (and (eq (process-status proc) :exited)
-                                            (process-exit-code proc)))))))
-             (spawn-error () (values "" "" nil))))
+                 ;; hand each read end to a stream one at a time, so a failure
+                 ;; building the second can't double-close the first's fd
+                 (setf os (sb-sys:make-fd-stream o-r :input t :element-type 'character))
+                 (setf o-r nil)
+                 (setf es (sb-sys:make-fd-stream e-r :input t :element-type 'character))
+                 (setf e-r nil)
+                 (let* ((out "") (err "")
+                        (t-out (spawn-stage-thread (lambda () (setf out (slurp-stream os)))
+                                                   :name "consh-probe-out"))
+                        (t-err (spawn-stage-thread (lambda () (setf err (slurp-stream es)))
+                                                   :name "consh-probe-err")))
+                   ;; bound the whole thing: kill a child that outlives TIMEOUT,
+                   ;; which EOFs both pipes and lets the drainers finish/join
+                   (unless (wait-process proc :timeout timeout)
+                     (ignore-errors (kill-process proc))
+                     (ignore-errors (wait-process proc :timeout timeout)))
+                   (ignore-errors (sb-thread:join-thread t-out :timeout timeout))
+                   (ignore-errors (sb-thread:join-thread t-err :timeout timeout))
+                   (values out err (and (eq (process-status proc) :exited)
+                                        (process-exit-code proc))))))
+           (spawn-error () (values "" "" nil)))
+      ;; the drainers are joined above, so closing the streams here is safe;
+      ;; also close any raw fd not yet owned by a stream (early-error paths)
+      (when os (ignore-errors (close os)))
+      (when es (ignore-errors (close es)))
       (dolist (fd (list o-r o-w e-r e-w))
         (when fd (%close-fd-safely fd))))))
 

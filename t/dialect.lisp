@@ -51,6 +51,21 @@
     (is (eq d (gethash "bash" consh::*dialect-cache*)))        ; memoized
     (is (eq d (probe-dialect "bash")))))                       ; same on re-ask
 
+(test capture-normal-command
+  (multiple-value-bind (out err code) (consh::%capture "echo" '("captured"))
+    (declare (ignore err))
+    (is (search "captured" out))
+    (is (eql 0 code))))
+
+(test capture-kills-a-hung-child-at-the-timeout
+  "A child that outlives TIMEOUT is killed rather than wedging the probe — so
+%capture (and probe-dialect) can't hang on a misbehaving program."
+  (let ((start (get-internal-real-time)))
+    (consh::%capture "sleep" '("30") :timeout 1)
+    (let ((elapsed (/ (- (get-internal-real-time) start)
+                      internal-time-units-per-second)))
+      (is (< elapsed 10)))))                                  ; ~1-2s, not 30s
+
 (test next-dialect-cycles
   (is (eq :bsd (next-dialect :gnu)))
   (is (eq :gnu (next-dialect :bsd)))
