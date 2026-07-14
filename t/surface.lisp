@@ -301,6 +301,45 @@ name the shell's own vocabulary unqualified — pipe, pipeline-collect, external
     (is (equal '("x.txt")
                (mapcar #'file-namestring (glob "sub/*.txt" :directory dir))))))
 
+;;; ---------------------------------------------------------------------------
+;;; Parser hardening: malformed input yields a clean error (or literal), never a
+;;; raw internal condition or a crash.
+;;; ---------------------------------------------------------------------------
+
+(test glob-unclosed-bracket-is-literal-not-a-crash
+  "An unterminated [ set matches the literal `[` instead of indexing off the end
+of the pattern."
+  (is-true (consh::%glob-match-p "[abc" "[abc"))
+  (is-false (consh::%glob-match-p "[abc" "abc"))
+  (is-false (consh::%glob-match-p "a[b" "axb")))   ; no crash on the interior [
+
+(test glob-malformed-pattern-matches-nothing
+  "A pattern that is not a valid pathname yields no matches (kept literal),
+never a raw NAMESTRING-PARSE-ERROR / TYPE-ERROR."
+  (finishes (glob "[^/bbc"))
+  (finishes (glob "/*/, -&"))
+  (is (null (glob "[^/no-such-zzz"))))
+
+(test malformed-escape-form-is-a-clean-parse-error
+  (signals shell-parse-error (tokenize "echo $(+ 1 2"))    ; unbalanced parens
+  (signals shell-parse-error (tokenize "echo ,#$foo")))    ; reader error
+
+(test stray-ampersand-is-a-clean-parse-error
+  "A `&` that is not the trailing background marker is a clean error, not a raw
+CASE-FAILURE."
+  (signals shell-parse-error (parse-shell-line "echo & foo")))
+
+(test adversarial-inputs-never-raise-raw-errors
+  "A batch of nasty lines must each parse or raise shell-parse-error — never a
+raw internal condition."
+  (dolist (line '("[" "]" "[a-" "[!]" "${" "${}" "$" "$(" ",(" "\"" "'" "<" ">"
+                  ">>" "2>" "| |" "& &" "a$b" "***" "*?[*" "/[};'" "echo `x"
+                  "[z-a]" "sub/[" "$()" ",)" "a\"b'c" "  |  "))
+    (handler-case (progn (tokenize line) (parse-shell-line line))
+      (shell-parse-error () t)
+      (serious-condition (e)
+        (fail "line ~S leaked a raw ~A" line (type-of e))))))
+
 ;;; ===========================================================================
 ;;; Builtins
 ;;; ===========================================================================

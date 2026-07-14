@@ -251,12 +251,15 @@ background without unbounded memory growth."
   ;; which is not among the run-state threads, so it never joins itself.
   (when (job-result job)
     (ignore-errors (%teardown (pipeline-result-state (job-result job)))))
+  ;; Post the "done" event BEFORE flipping complete-p and broadcasting — else a
+  ;; waiter woken by the broadcast (wait-job / fg) can return and read
+  ;; job-events before "done" has been posted (a lost-event race / flake).
+  (%post-event job (format nil "job ~D done" (job-id job)))
   (sb-thread:with-mutex ((job-lock job))
     (setf (job-complete-p job) t)
     (unless (member (job-state job) '(:stopped :parked))
       (setf (job-state job) :done))
-    (sb-thread:condition-broadcast (job-cvar job)))
-  (%post-event job (format nil "job ~D done" (job-id job))))
+    (sb-thread:condition-broadcast (job-cvar job))))
 
 (defun job-output-list (job)
   "A snapshot of the retained output, oldest first."

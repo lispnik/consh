@@ -63,6 +63,14 @@ push the right redirection token kind.  Returns the token."
                    (cons :redir (if (eql fd #\2) :err-append :out-append)))
             (cons :redir (if (eql fd #\2) :err :out))))))
 
+(defun %read-escape-form (stream line)
+  "Read one Lisp form for a `,` or `$(...)` escape.  A malformed form (unbalanced
+parens, a reader error) becomes a clean SHELL-PARSE-ERROR rather than a raw
+END-OF-FILE / READER-ERROR leaking out of the tokenizer."
+  (handler-case (read stream nil nil)
+    (serious-condition ()
+      (error 'shell-parse-error :line line))))
+
 (defun tokenize (line)
   "Tokenize LINE into a list of tokens, each one of:
   (:word . string)     a literal word (quotes stripped),
@@ -80,11 +88,12 @@ push the right redirection token kind.  Returns the token."
                  ((char= c #\|) (read-char s) (push '(:pipe) tokens))
                  ((char= c #\&) (read-char s) (push '(:amp) tokens))
                  ((or (char= c #\<) (char= c #\>)) (push (%read-redirect s nil) tokens))
-                 ((char= c #\,) (read-char s) (push (cons :escape (read s nil nil)) tokens))
+                 ((char= c #\,) (read-char s)
+                  (push (cons :escape (%read-escape-form s line)) tokens))
                  ((char= c #\$)
                   (read-char s)
                   (if (eql (peek-char nil s nil nil) #\()
-                      (push (cons :escape (read s nil nil)) tokens)          ; $(form)
+                      (push (cons :escape (%read-escape-form s line)) tokens) ; $(form)
                       (push (cons :word (concatenate 'string "$" (%read-word s)))
                             tokens)))                                        ; $VAR / ${VAR}
                  ((member c '(#\" #\')) (push (cons :word (%read-quoted s c)) tokens))
@@ -156,7 +165,8 @@ unset).  A `$` not starting a valid reference stays literal."
 
 (defun %match-set (pattern i ch)
   "PATTERN[I] is `[`.  Match CH against the set, returning (values matched-p
-index-after-])."
+index-after-] closed-p).  CLOSED-P is NIL when the `[` has no matching `]`, in
+which case the caller should treat the `[` as a literal character."
   (let ((j (1+ i)) (n (length pattern)) (negate nil) (matched nil))
     (when (and (< j n) (member (char pattern j) '(#\! #\^))) (setf negate t) (incf j))
     (loop while (and (< j n) (char/= (char pattern j) #\])) do
@@ -167,7 +177,9 @@ index-after-])."
                  (incf j 3))
           (progn (when (char= (char pattern j) ch) (setf matched t))
                  (incf j))))
-    (values (if negate (not matched) matched) (1+ j))))   ; skip the closing ]
+    (if (< j n)                                           ; j is at the closing ]
+        (values (if negate (not matched) matched) (1+ j) t)
+        (values nil j nil))))                             ; unterminated set
 
 (defun %glob-match-p (pattern name)
   "True if shell glob PATTERN (`*` any run, `?` one char, `[set]`) matches NAME.
@@ -184,8 +196,11 @@ A leading dot in NAME is not matched by a leading `*`/`?` (Unix convention)."
                ((= sx (length name)) nil)
                ((char= (char pattern px) #\?) (m (1+ px) (1+ sx)))
                ((char= (char pattern px) #\[)
-                (multiple-value-bind (ok next) (%match-set pattern px (char name sx))
-                  (and ok (m next (1+ sx)))))
+                (multiple-value-bind (ok next closed) (%match-set pattern px (char name sx))
+                  (if closed
+                      (and ok (m next (1+ sx)))
+                      ;; unmatched `[` — match it as a literal character
+                      (and (char= (char name sx) #\[) (m (1+ px) (1+ sx))))))
                ((char= (char pattern px) (char name sx)) (m (1+ px) (1+ sx)))
                (t nil))))
     (m 0 0)))
@@ -201,19 +216,23 @@ A leading dot in NAME is not matched by a leading `*`/`?` (Unix convention)."
 (defun glob (pattern &key (directory *current-directory*))
   "Return the pathnames under DIRECTORY matching shell PATTERN (`*` `?` `[set]`),
 sorted.  A pattern with a directory part globs its basename in that
-subdirectory.  Resolves against *current-directory*, never the process cwd."
-  (let* ((slash (position #\/ pattern :from-end t))
-         (subdir (if slash (subseq pattern 0 (1+ slash)) ""))
-         (base-pat (if slash (subseq pattern (1+ slash)) pattern))
-         (base (merge-pathnames subdir directory))
-         (entries (ignore-errors
-                   (directory (merge-pathnames (make-pathname :name :wild :type :wild)
-                                               base)))))
-    (sort (loop for p in entries
-                when (%glob-match-p base-pat (%basename p))
-                  collect (merge-pathnames (concatenate 'string subdir (%basename p))
-                                           directory))
-          #'string< :key #'namestring)))
+subdirectory.  Resolves against *current-directory*, never the process cwd.  A
+PATTERN that is not a valid pathname simply matches nothing (the caller keeps the
+word literal) — never a raw pathname-parse error."
+  (handler-case
+      (let* ((slash (position #\/ pattern :from-end t))
+             (subdir (if slash (subseq pattern 0 (1+ slash)) ""))
+             (base-pat (if slash (subseq pattern (1+ slash)) pattern))
+             (base (merge-pathnames subdir directory))
+             (entries (ignore-errors
+                       (directory (merge-pathnames (make-pathname :name :wild :type :wild)
+                                                   base)))))
+        (sort (loop for p in entries
+                    when (%glob-match-p base-pat (%basename p))
+                      collect (merge-pathnames (concatenate 'string subdir (%basename p))
+                                               directory))
+              #'string< :key #'namestring))
+    (error () nil)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Parsing a command line into a Lisp form
@@ -232,9 +251,14 @@ matches nothing stays literal (bash default)."
   "Expand vars + globs across TOKENS into a flat list of argument forms (strings
 and, for escapes, Lisp forms)."
   (loop for tok in tokens
-        append (ecase (car tok)
+        append (case (car tok)
                  (:word (%expand-word-arg (cdr tok)))
-                 (:escape (list (cdr tok))))))
+                 (:escape (list (cdr tok)))
+                 ;; :pipe/:redir are consumed earlier; a leftover (e.g. a `&`
+                 ;; that is not trailing) is malformed — a clean error, not a
+                 ;; raw CASE-FAILURE.
+                 (t (error 'shell-parse-error
+                           :line (format nil "unexpected token: ~S" tok))))))
 
 (defun %split-redirects (tokens)
   "Return (values argument-tokens redirections-alist).  Each (:redir . KIND)
