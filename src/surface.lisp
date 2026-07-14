@@ -53,15 +53,29 @@ spliced in literally."
       (unread-char d stream))))
 
 (defun %read-redirect (stream fd)
-  "At a `<` or `>` (FD is the explicit fd char or NIL), read the operator and
-push the right redirection token kind.  Returns the token."
+  "At a `<` or `>` (FD is the explicit fd char, e.g. #\\2, or NIL for the default),
+read the operator and return the redirection token:
+  (:redir . KIND)         a file redirect (next :word is its target),
+  (:redir-dup FROM TO)    an fd duplication like `2>&1` / `>&2` (self-contained),
+  (:redir-both . KIND)    `>&word` = both stdout+stderr to the next :word."
   (let ((c (read-char stream)))               ; consume < or >
-    (if (char= c #\<)
-        '(:redir . :in)
-        (if (eql (peek-char nil stream nil nil) #\>)
-            (progn (read-char stream)
-                   (cons :redir (if (eql fd #\2) :err-append :out-append)))
-            (cons :redir (if (eql fd #\2) :err :out))))))
+    (cond
+      ((char= c #\<) '(:redir . :in))
+      ;; `>>` append
+      ((eql (peek-char nil stream nil nil) #\>)
+       (read-char stream)
+       (cons :redir (if (eql fd #\2) :err-append :out-append)))
+      ;; `>&` — fd duplication (`>&2`, `2>&1`) or `>&word` (both to a file)
+      ((eql (peek-char nil stream nil nil) #\&)
+       (read-char stream)                     ; consume &
+       (let ((nxt (peek-char nil stream nil nil)))
+         (if (and nxt (digit-char-p nxt))
+             (progn (read-char stream)
+                    (list :redir-dup
+                          (if (eql fd #\2) 2 1)                 ; FROM fd
+                          (- (char-code nxt) (char-code #\0)))) ; TO fd
+             (cons :redir-both :trunc))))      ; >&word -> both to word
+      (t (cons :redir (if (eql fd #\2) :err :out))))))
 
 (defun %read-escape-form (stream line)
   "Read one Lisp form for a `,` or `$(...)` escape.  A malformed form (unbalanced
@@ -86,7 +100,15 @@ END-OF-FILE / READER-ERROR leaking out of the tokenizer."
             do (cond
                  ((member c '(#\Space #\Tab #\Newline)) (read-char s))
                  ((char= c #\|) (read-char s) (push '(:pipe) tokens))
-                 ((char= c #\&) (read-char s) (push '(:amp) tokens))
+                 ((char= c #\&)
+                  (read-char s)
+                  (if (eql (peek-char nil s nil nil) #\>)
+                      ;; `&>word` / `&>>word` — both stdout+stderr to the word
+                      (progn (read-char s)              ; consume >
+                             (let ((appendp (eql (peek-char nil s nil nil) #\>)))
+                               (when appendp (read-char s))
+                               (push (cons :redir-both (if appendp :append :trunc)) tokens)))
+                      (push '(:amp) tokens)))            ; plain trailing & (background)
                  ((or (char= c #\<) (char= c #\>)) (push (%read-redirect s nil) tokens))
                  ((char= c #\,) (read-char s)
                   (push (cons :escape (%read-escape-form s line)) tokens))
@@ -279,18 +301,35 @@ and, for escapes, Lisp forms)."
                  (t (error 'shell-parse-error
                            :line (format nil "unexpected token: ~S" tok))))))
 
+(defun %redir-target (rest)
+  "Pop and var-expand the :word target that a file redirection requires; error if
+the next token is not a word.  Returns (values path remaining-tokens)."
+  (let ((target (first rest)))
+    (unless (and target (eq (car target) :word))
+      (error 'shell-parse-error :line "redirection is missing a target"))
+    (values (%expand-vars (cdr target)) (rest rest))))
+
 (defun %split-redirects (tokens)
-  "Return (values argument-tokens redirections-alist).  Each (:redir . KIND)
-token consumes the following :word as its (var-expanded) target."
+  "Return (values argument-tokens redirection-specs).  Specs are kept in
+command-line ORDER (fd duplication depends on it) — each is one of:
+  (KIND . path)      a file redirect (KIND :in :out :out-append :err :err-append),
+  (:dup FROM TO)     dup2 TO onto FROM (from `2>&1` / `>&2`)."
   (let ((args '()) (redirs '()) (rest tokens))
     (loop while rest do
       (let ((tok (pop rest)))
-        (if (eq (car tok) :redir)
-            (let ((target (pop rest)))
-              (unless (and target (eq (car target) :word))
-                (error 'shell-parse-error :line "redirection is missing a target"))
-              (push (cons (cdr tok) (%expand-vars (cdr target))) redirs))
-            (push tok args))))
+        (case (car tok)
+          (:redir
+           (multiple-value-bind (path more) (%redir-target rest)
+             (setf rest more)
+             (push (cons (cdr tok) path) redirs)))
+          (:redir-both                        ; `&>f` / `>&f`: stdout->f, stderr->stdout
+           (multiple-value-bind (path more) (%redir-target rest)
+             (setf rest more)
+             (push (cons (if (eq (cdr tok) :append) :out-append :out) path) redirs)
+             (push (list :dup 2 1) redirs)))
+          (:redir-dup                          ; `2>&1` / `>&2`
+           (push (list :dup (second tok) (third tok)) redirs))
+          (t (push tok args)))))
     (values (nreverse args) (nreverse redirs))))
 
 (defun %split-pipe (tokens)

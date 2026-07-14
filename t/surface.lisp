@@ -542,3 +542,48 @@ cwd."
       (shell-eval "echo hi > rel.txt"))
     (is (probe-file (merge-pathnames "rel.txt" dir)))
     (is (equal cwd-before (sb-posix:getcwd)))))
+
+;;; --- fd duplication: 2>&1, >&2, &>file --------------------------------------
+
+(test tokenize-fd-duplication
+  (is (equal '((:word . "cmd") (:redir-dup 2 1)) (tokenize "cmd 2>&1")))
+  (is (equal '((:word . "cmd") (:redir-dup 1 2)) (tokenize "cmd >&2")))
+  (is (equal '((:word . "cmd") (:redir-dup 1 2)) (tokenize "cmd 1>&2")))
+  (is (equal '((:word . "cmd") (:redir-both . :trunc) (:word . "f")) (tokenize "cmd &>f")))
+  (is (equal '((:word . "cmd") (:redir-both . :append) (:word . "f")) (tokenize "cmd &>>f")))
+  ;; a plain trailing & is still background, not a redirect
+  (is (equal '((:word . "cmd") (:amp)) (tokenize "cmd &"))))
+
+(test parse-fd-duplication-specs
+  (is (equal '(%shell-run (list (external "cmd" :redirections '((:dup 2 1)))) :background nil)
+             (parse-shell-line "cmd 2>&1")))
+  ;; &>f  ->  stdout to f, then stderr dup'd from stdout, in order
+  (is (equal '(%shell-run (list (external "cmd" :redirections '((:out . "f") (:dup 2 1))))
+              :background nil)
+             (parse-shell-line "cmd &>f"))))
+
+(test run-2>&1-merges-stderr-into-stdout
+  "`2>&1` sends stderr to wherever stdout goes — so the object stream (which reads
+the tail's stdout) sees both lines."
+  (is (equal '("OUT" "ERR")
+             (shell-eval "sh -c 'echo OUT; echo ERR >&2' 2>&1"))))
+
+(test run-both-to-file-and-order-matters
+  (let ((dir (make-temp-dir)))
+    (let ((*current-directory* dir))
+      ;; &>both.txt : both stdout and stderr into the file
+      (shell-eval "sh -c 'echo O; echo E >&2' &> both.txt")
+      (is (equal '("E" "O")                       ; both lines present (sorted)
+                 (sort (with-open-file (s (merge-pathnames "both.txt" dir))
+                         (loop for l = (read-line s nil nil) while l collect l))
+                       #'string<)))
+      ;; `>f 2>&1` also sends both to the file...
+      (shell-eval "sh -c 'echo O; echo E >&2' > ord.txt 2>&1")
+      (is (= 2 (length (with-open-file (s (merge-pathnames "ord.txt" dir))
+                         (loop for l = (read-line s nil nil) while l collect l)))))
+      ;; ...but `2>&1 >f` sends ONLY stdout to the file (stderr stays on the
+      ;; inherited fd 2), so the file has just one line
+      (shell-eval "sh -c 'echo O; echo E >&2' 2>&1 > only.txt")
+      (is (equal '("O")
+                 (with-open-file (s (merge-pathnames "only.txt" dir))
+                   (loop for l = (read-line s nil nil) while l collect l)))))))

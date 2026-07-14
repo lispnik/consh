@@ -298,7 +298,7 @@ surface just desugars to the pipeline/job forms above.
 (shell-eval "seq 1 5 | grep 3")              => (#<GREP-MATCH 3 "3">)  ; grep -n enriches
 (shell-eval "echo $HOME/notes")              => ("/home/you/notes")  ; $VAR expands
 (shell-eval "cat *.txt")                     ; globs to matching pathnames
-(shell-eval "sort < in.txt > out.txt")       ; < > >> 2> redirections
+(shell-eval "sort < in.txt > out.txt")       ; < > >> 2> 2>&1 >&2 &> redirections
 (shell-eval "echo $(string-upcase \"hi\")")  => ("HI")     ; $() escapes to Lisp
 (shell-eval "(+ 40 2)")                      => 42         ; ( ... ) is Lisp
 

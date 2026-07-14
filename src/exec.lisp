@@ -141,36 +141,36 @@ retained text (with a marker if it overran)."
     (let ((s (get-output-stream-string out)))
       (if truncated (concatenate 'string s "[...stderr truncated...]") s))))
 
+(defun %redir-open-action (fd path append-p)
+  "A spawn :open action putting PATH on FD for writing (truncating or appending)."
+  (list :open fd path
+        (logior sb-posix:o-wronly sb-posix:o-creat
+                (if append-p sb-posix:o-append sb-posix:o-trunc))
+        #o644))
+
 (defun %stage-file-actions (stage in-fd out-fd err-fd)
-  "Build the spawn file actions for one external STAGE: dup2 the plumbing fds
-into 0/1/2, except where a shell redirection overrides a stream with an opened
-file.  Redirect paths are relative to the child's (chdir'd) *current-directory*."
-  (let* ((redirs (and (typep stage 'external-stage) (stage-redirections stage)))
-         (in-r  (cdr (assoc :in redirs)))
-         (out-r (or (assoc :out redirs) (assoc :out-append redirs)))
-         (err-r (or (assoc :err redirs) (assoc :err-append redirs)))
-         (actions '()))
-    ;; stdin (fd 0)
-    (cond (in-r  (push (list :open 0 in-r sb-posix:o-rdonly 0) actions))
-          (in-fd (push (list :dup2 in-fd 0) actions))
-          (t     (push *devnull-stdin* actions)))
-    ;; stdout (fd 1)
-    (if out-r
-        (push (list :open 1 (cdr out-r)
-                    (logior sb-posix:o-wronly sb-posix:o-creat
-                            (if (eq (car out-r) :out-append) sb-posix:o-append sb-posix:o-trunc))
-                    #o644)
-              actions)
-        (push (list :dup2 out-fd 1) actions))
-    ;; stderr (fd 2)
-    (if err-r
-        (push (list :open 2 (cdr err-r)
-                    (logior sb-posix:o-wronly sb-posix:o-creat
-                            (if (eq (car err-r) :err-append) sb-posix:o-append sb-posix:o-trunc))
-                    #o644)
-              actions)
-        (push (list :dup2 err-fd 2) actions))
-    actions))
+  "Build the spawn file actions for one external STAGE.  First the pipeline
+plumbing (dup2 the in/out/err fds into 0/1/2), then the shell redirections IN
+COMMAND-LINE ORDER — each opening a file on, or dup2'ing another fd onto, one of
+0/1/2.  Order matters: `>f 2>&1` sends both streams to the file, `2>&1 >f` sends
+only stdout.  Redirect paths are relative to the child's *current-directory*."
+  (let ((redirs (and (typep stage 'external-stage) (stage-redirections stage)))
+        (actions '()))
+    (flet ((act (a) (push a actions)))
+      ;; base plumbing (later redirections override these)
+      (act (if in-fd (list :dup2 in-fd 0) *devnull-stdin*))
+      (act (list :dup2 out-fd 1))
+      (act (list :dup2 err-fd 2))
+      ;; redirections, in order
+      (dolist (r redirs)
+        (case (car r)
+          (:in          (act (list :open 0 (cdr r) sb-posix:o-rdonly 0)))
+          (:out         (act (%redir-open-action 1 (cdr r) nil)))
+          (:out-append  (act (%redir-open-action 1 (cdr r) t)))
+          (:err         (act (%redir-open-action 2 (cdr r) nil)))
+          (:err-append  (act (%redir-open-action 2 (cdr r) t)))
+          (:dup         (act (list :dup2 (third r) (second r)))))))  ; dup2 TO -> FROM
+    (nreverse actions)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Running an external group (a maximal run of external stages)
