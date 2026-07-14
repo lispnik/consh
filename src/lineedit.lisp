@@ -34,7 +34,14 @@
   (point 0 :type fixnum)                 ; cursor index into TEXT
   (history #() :type vector)             ; command strings, oldest first
   (hidx nil)                             ; NIL editing a fresh line, else history index
-  (stash "" :type string))               ; the fresh line stashed while browsing history
+  (stash "" :type string)                ; the fresh line stashed while browsing history
+  ;; reverse-incremental-search (^R) sub-mode state
+  (searching nil)                        ; T while in ^R search mode
+  (squery "" :type string)               ; the accumulated search query
+  (sindex nil)                           ; history index of the current match
+  (sfailed nil)                          ; T when the query matches nothing
+  (sorig-text "" :type string)           ; line to restore if the search is cancelled
+  (sorig-point 0 :type fixnum))
 
 (defun make-ledit (&optional (history *line-history*))
   (%make-ledit :history (coerce history 'vector)))
@@ -165,6 +172,62 @@ chars back."
           (progn (incf (ledit-hidx ed)) (%ledit-set-line ed (aref h (ledit-hidx ed))))
           (progn (setf (ledit-hidx ed) nil) (%ledit-set-line ed (ledit-stash ed)))))))
 
+;;; --- reverse incremental search (^R) -------------------------------------
+
+(defun %history-search-backward (history query before-index)
+  "Index of the newest history entry at or before BEFORE-INDEX whose text
+contains QUERY (case-sensitive substring), or NIL.  Empty QUERY matches any
+entry, so it walks the whole history."
+  (loop for i from (min before-index (1- (length history))) downto 0
+        when (search query (aref history i)) return i))
+
+(defun %ledit-search-from (ed start)
+  "Search backward from index START for the current query; on a hit, adopt that
+history line; on a miss, keep the line but mark the search failed."
+  (let ((i (%history-search-backward (ledit-history ed) (ledit-squery ed) start)))
+    (cond (i (setf (ledit-sindex ed) i
+                   (ledit-sfailed ed) nil)
+             (%ledit-set-line ed (aref (ledit-history ed) i)))
+          (t (setf (ledit-sfailed ed) t)))))
+
+(defun ledit-reverse-search (ed)
+  "^R: enter reverse-search mode, or (already in it) step to an older match."
+  (let ((h (ledit-history ed)))
+    (cond
+      ((zerop (length h)) nil)
+      ((not (ledit-searching ed))
+       ;; enter; leave the line untouched until the user types or hits ^R again
+       (setf (ledit-searching ed) t
+             (ledit-squery ed) ""
+             (ledit-sfailed ed) nil
+             (ledit-sindex ed) (length h)          ; first search covers everything
+             (ledit-sorig-text ed) (ledit-text ed)
+             (ledit-sorig-point ed) (ledit-point ed)))
+      (t                                            ; strictly older than the current match
+       (%ledit-search-from ed (1- (or (ledit-sindex ed) (length h))))))))
+
+(defun ledit-search-type (ed ch)
+  "Extend the search query and re-search from the current match position."
+  (setf (ledit-squery ed) (concatenate 'string (ledit-squery ed) (string ch)))
+  (%ledit-search-from ed (or (ledit-sindex ed) (length (ledit-history ed)))))
+
+(defun ledit-search-backspace (ed)
+  "Shorten the search query and re-search."
+  (let ((q (ledit-squery ed)))
+    (when (plusp (length q))
+      (setf (ledit-squery ed) (subseq q 0 (1- (length q))))
+      (%ledit-search-from ed (or (ledit-sindex ed) (length (ledit-history ed)))))))
+
+(defun ledit-search-accept (ed)
+  "Leave search mode keeping the matched line as a fresh edit."
+  (setf (ledit-searching ed) nil (ledit-hidx ed) nil))
+
+(defun ledit-search-cancel (ed)
+  "Leave search mode, restoring the line as it was before ^R."
+  (setf (ledit-searching ed) nil (ledit-hidx ed) nil)
+  (%ledit-set-line ed (ledit-sorig-text ed))
+  (setf (ledit-point ed) (min (ledit-sorig-point ed) (length (ledit-text ed)))))
+
 ;;; --- Tab completion -------------------------------------------------------
 
 (defun %common-prefix (strings)
@@ -202,9 +265,21 @@ several candidates remain (the driver lists them)."
 
 ;;; --- Key dispatch (the driver feeds keys here) ----------------------------
 
-(defun ledit-key (ed key)
-  "Apply KEY to ED, returning an action: :redraw, :submit, :cancel, :eof, or
-(:show . completions).  KEY is a character (insert) or a keyword."
+(defun %ledit-search-key (ed key)
+  "Key dispatch while in ^R reverse-search mode."
+  (if (characterp key)
+      (progn (ledit-search-type ed key) :redraw)
+      (case key
+        (:reverse-search (ledit-reverse-search ed) :redraw)   ; older match
+        (:backspace      (ledit-search-backspace ed) :redraw)
+        (:cancel         (ledit-search-cancel ed) :redraw)    ; ^C: restore the line, stay
+        (:enter          (ledit-search-accept ed) :submit)    ; accept + run
+        (:eof            (ledit-search-cancel ed) :redraw)    ; ^D: leave search
+        ;; any movement/edit key accepts the match, then applies normally
+        (t (ledit-search-accept ed) (%ledit-normal-key ed key)))))
+
+(defun %ledit-normal-key (ed key)
+  "Key dispatch during ordinary editing (not in search mode)."
   (if (characterp key)
       (progn (ledit-insert ed key) :redraw)
       ;; CASE (not ECASE): an unknown key — including the :redraw that %read-key
@@ -226,6 +301,7 @@ several candidates remain (the driver lists them)."
         (:yank        (ledit-yank ed) :redraw)
         (:transpose   (ledit-transpose ed) :redraw)
         (:clear       :clear)               ; ^L — driver clears the screen, repaints
+        (:reverse-search (ledit-reverse-search ed) :redraw)  ; ^R — enter search mode
         (:prev        (ledit-history-prev ed) :redraw)
         (:next        (ledit-history-next ed) :redraw)
         (:tab         (ledit-complete ed))
@@ -233,6 +309,14 @@ several candidates remain (the driver lists them)."
         (:cancel      :cancel)
         (:eof         (if (zerop (length (ledit-text ed))) :eof :redraw))
         (t            :redraw))))
+
+(defun ledit-key (ed key)
+  "Apply KEY to ED, returning an action: :redraw, :submit, :cancel, :eof, :clear,
+or (:show . completions).  Routes to the ^R search sub-mode when active.  KEY is
+a character (insert) or a keyword."
+  (if (ledit-searching ed)
+      (%ledit-search-key ed key)
+      (%ledit-normal-key ed key)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Terminal driver (raw mode via stty; interactive tty only)
@@ -329,6 +413,7 @@ signal-interrupted syscalls when FD is given."
       ((char= c (code-char 23)) :kill-word-back) ; ^W
       ((char= c (code-char 25)) :yank)           ; ^Y
       ((char= c (code-char 12)) :clear)          ; ^L
+      ((char= c (code-char 18)) :reverse-search) ; ^R
       ((char= c (code-char 20)) :transpose)      ; ^T
       ((char= c #\Tab) :tab)
       ((char= c #\Escape)
@@ -373,6 +458,12 @@ signal-interrupted syscalls when FD is given."
   (format out "~C[~DG" #\Escape (+ 1 (%display-width prompt) (ledit-point ed)))
   (finish-output out))
 
+(defun %search-prompt (ed)
+  "The transient prompt shown during ^R reverse-search, e.g.
+`(reverse-i-search)`git': `; `failed ` prefixes it when the query matches nothing."
+  (format nil "(~:[~;failed ~]reverse-i-search)`~A': "
+          (ledit-sfailed ed) (ledit-squery ed)))
+
 (defun read-line-edited (prompt &key (in *standard-input*) (out *standard-output*))
   "Read a line with editing/completion/history from raw-mode terminal IN.
 Returns the line string, or NIL on EOF."
@@ -381,26 +472,29 @@ Returns the line string, or NIL on EOF."
          ;; snapshot the exact terminal state so we can restore it with a single
          ;; tcsetattr syscall — robust against a preempted `stty sane` subprocess
          (saved (and fd (save-termios fd))))
-    (%stty '("-echo" "-icanon" "min" "1" "time" "0"))
-    (unwind-protect
-         (progn
-           (%redraw ed prompt out)
-           (loop
-             (let ((action (ledit-key ed (%read-key in fd))))
-               (case action
-                 (:submit (format out "~%") (return (ledit-text ed)))
-                 (:cancel (format out "^C~%") (%ledit-set-line ed "")
-                          (setf (ledit-hidx ed) nil))
-                 (:clear (format out "~C[2J~C[H" #\Escape #\Escape)  ; ^L: wipe + home
-                         (%redraw ed prompt out))
-                 (:eof (format out "~%") (return nil))
-                 (t (when (and (consp action) (eq (car action) :show))
-                      (format out "~%~{~A~^  ~}~%" (cdr action)))
-                    (%redraw ed prompt out))))))
-      ;; restore the captured attributes atomically; fall back to `stty sane`
-      ;; only if we could not snapshot them
-      (unless (and fd saved (restore-termios fd saved))
-        (%stty '("sane"))))))
+    (flet ((repaint ()
+             ;; while searching, the prompt becomes the incremental-search prompt
+             (%redraw ed (if (ledit-searching ed) (%search-prompt ed) prompt) out)))
+      (%stty '("-echo" "-icanon" "min" "1" "time" "0"))
+      (unwind-protect
+           (progn
+             (repaint)
+             (loop
+               (let ((action (ledit-key ed (%read-key in fd))))
+                 (case action
+                   (:submit (format out "~%") (return (ledit-text ed)))
+                   (:cancel (format out "^C~%") (%ledit-set-line ed "")
+                            (setf (ledit-hidx ed) nil))
+                   (:clear (format out "~C[2J~C[H" #\Escape #\Escape)  ; ^L: wipe + home
+                           (repaint))
+                   (:eof (format out "~%") (return nil))
+                   (t (when (and (consp action) (eq (car action) :show))
+                        (format out "~%~{~A~^  ~}~%" (cdr action)))
+                      (repaint))))))
+        ;; restore the captured attributes atomically; fall back to `stty sane`
+        ;; only if we could not snapshot them
+        (unless (and fd saved (restore-termios fd saved))
+          (%stty '("sane")))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The REPL

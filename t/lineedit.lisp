@@ -108,6 +108,56 @@
     (ledit-key ed :transpose)                     ; swap c and b -> "abc"
     (is (string= "abc" (ledit-text ed)))))
 
+;;; ===========================================================================
+;;; Reverse incremental search (^R)
+;;; ===========================================================================
+
+(test reverse-search-finds-and-cycles-history
+  (let ((ed (make-ledit (vector "git commit" "ls -la" "grep foo" "git push"))))
+    (ledit-key ed :reverse-search)                ; enter search mode
+    (type-string ed "git")                        ; query -> newest match
+    (is (string= "git push" (ledit-text ed)))
+    (ledit-key ed :reverse-search)                ; step to the older match
+    (is (string= "git commit" (ledit-text ed)))
+    (is (eq :submit (ledit-key ed :enter)))       ; accept + submit
+    (is (string= "git commit" (ledit-text ed)))))
+
+(test reverse-search-cancel-restores-line
+  (let ((ed (make-ledit (vector "alpha" "beta"))))
+    (type-string ed "orig")                       ; a fresh line in progress
+    (ledit-key ed :reverse-search)
+    (type-string ed "bet")                        ; matches "beta"
+    (is (string= "beta" (ledit-text ed)))
+    (ledit-key ed :cancel)                        ; ^C in search restores the line
+    (is (string= "orig" (ledit-text ed)))
+    (is (= 4 (ledit-point ed)))))
+
+(test reverse-search-movement-key-accepts-match
+  (let ((ed (make-ledit (vector "one two" "three four"))))
+    (ledit-key ed :reverse-search)
+    (type-string ed "three")
+    (is (string= "three four" (ledit-text ed)))
+    (ledit-key ed :home)                          ; a movement key accepts + acts
+    (is (= 0 (ledit-point ed)))
+    (type-string ed "X ")                         ; back in ordinary editing
+    (is (string= "X three four" (ledit-text ed)))))
+
+(test reverse-search-failed-query-keeps-line
+  (let ((ed (make-ledit (vector "abc" "def"))))
+    (ledit-key ed :reverse-search)
+    (type-string ed "zzz")                        ; no match
+    (is-true (consh::ledit-sfailed ed))
+    (is (string= "" (ledit-text ed)))))           ; the line is left untouched
+
+(test reverse-search-backspace-widens-query
+  (let ((ed (make-ledit (vector "make build" "make test"))))
+    (ledit-key ed :reverse-search)
+    (type-string ed "test")                       ; matches "make test"
+    (is (string= "make test" (ledit-text ed)))
+    (ledit-key ed :backspace)                     ; query "tes" — still matches test
+    (ledit-key ed :backspace)                     ; "te"
+    (is (string= "make test" (ledit-text ed)))))
+
 (test boundary-moves-are-safe
   (let ((ed (make-ledit)))
     (ledit-key ed :left) (ledit-key ed :backspace) (ledit-key ed :delete) (ledit-key ed :right)
