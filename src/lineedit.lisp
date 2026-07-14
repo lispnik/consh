@@ -583,7 +583,8 @@ signal-interrupted syscalls when FD is given."
 autosuggestion is drawn dim after the text; the cursor is then placed back before
 it so typing continues at point."
   (let ((suggestion (%ledit-suggestion ed)))
-    (format out "~C[2K~C~A~A" #\Escape #\Return prompt (ledit-text ed)) ; clear line, home, prompt+text
+    ;; clear line, home, prompt + syntax-highlighted text (escapes add no width)
+    (format out "~C[2K~C~A~A" #\Escape #\Return prompt (%highlight (ledit-text ed)))
     (when suggestion
       (format out "~C[90m~A~C[0m" #\Escape suggestion #\Escape))        ; dim grey ghost text
     ;; column = visible prompt width + point (1-based); %display-width so ANSI

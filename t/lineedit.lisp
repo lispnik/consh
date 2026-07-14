@@ -29,6 +29,26 @@
     (ledit-key ed :home) (is (= 0 (ledit-point ed)))
     (ledit-key ed :end)  (is (= 3 (ledit-point ed)))))
 
+(test highlight-adds-no-visible-width
+  "The critical property: highlighting inserts only zero-width escapes, so the
+line editor's cursor math (which counts raw characters) stays correct."
+  (let ((consh::*highlight* t))
+    (dolist (line '("ls | grep foo" "cd \"my dir\" && pwd" "echo $HOME > out"))
+      (is (= (length line) (consh::%display-width (consh::%highlight line)))))))
+
+(test highlight-colors-command-validity
+  (let ((consh::*highlight* t))
+    ;; a known command (builtin) is green, an unknown one red
+    (is (search (format nil "~C[32m" #\Escape) (consh::%highlight "cd")))
+    (is (search (format nil "~C[31m" #\Escape) (consh::%highlight "no-such-cmd-zzz")))
+    ;; a string is yellow, an operator cyan
+    (is (search (format nil "~C[33m" #\Escape) (consh::%highlight "echo \"hi\"")))
+    (is (search (format nil "~C[36m" #\Escape) (consh::%highlight "a | b")))))
+
+(test highlight-off-returns-raw-text
+  (let ((consh::*highlight* nil))
+    (is (string= "ls | grep" (consh::%highlight "ls | grep")))))
+
 (test display-width-ignores-ansi-escapes
   "%DISPLAY-WIDTH counts visible columns, skipping ANSI CSI (colour) sequences —
    this is what keeps a coloured prompt from misplacing the cursor."
