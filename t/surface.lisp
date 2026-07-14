@@ -319,6 +319,19 @@ trailing `/` (`*/`) restricts matches to directories."
                (mapcar (lambda (p) (car (last (pathname-directory p))))
                        (glob "*/" :directory dir))))))
 
+(test glob-returns-relative-paths
+  "A relative pattern yields RELATIVE pathnames (like a shell) so they resolve
+against a spawned child's chdir'd cwd; an absolute pattern stays absolute."
+  (let ((dir (make-temp-dir)))
+    (ensure-directories-exist (merge-pathnames "sub/" dir))
+    (dolist (p '("a.txt" "sub/x.txt"))
+      (with-open-file (s (merge-pathnames p dir) :direction :output) (write-string "x" s)))
+    (is (equal '("a.txt") (mapcar #'namestring (glob "*.txt" :directory dir))))
+    (is (equal '("sub/x.txt") (mapcar #'namestring (glob "sub/*.txt" :directory dir))))
+    ;; an absolute pattern keeps absolute results
+    (is (every (lambda (p) (eq :absolute (car (pathname-directory p))))
+               (glob (concatenate 'string (namestring dir) "*.txt"))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Parser hardening: malformed input yields a clean error (or literal), never a
 ;;; raw internal condition or a crash.

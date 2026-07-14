@@ -296,15 +296,22 @@ directories."
 path component may be a glob — `*/`, `*/foo`, `src/*/x` all expand — walking the
 filesystem component by component from DIRECTORY (or `/` for an absolute
 pattern).  Resolves against *current-directory*, never the process cwd.  A
-PATTERN that is not a valid pathname simply matches nothing (the caller keeps the
-word literal) — never a raw pathname-parse error."
+relative pattern yields RELATIVE pathnames (`a.txt`, `sub/x.txt`), like a shell,
+so they resolve against a spawned child's chdir'd cwd; an absolute pattern yields
+absolute pathnames.  A PATTERN that is not a valid pathname simply matches
+nothing (the caller keeps the word literal) — never a raw pathname-parse error."
   (handler-case
       (let* ((n (length pattern))
              (absolutep (and (plusp n) (char= (char pattern 0) #\/)))
              (need-dir-last (and (plusp n) (char= (char pattern (1- n)) #\/)))
              (comps (remove "" (%split-string pattern #\/) :test #'string=))
-             (root (if absolutep #p"/" (pathname directory))))
-        (sort (%glob-walk comps (list root) need-dir-last) #'string< :key #'namestring))
+             (root (if absolutep #p"/" (pathname directory)))
+             (matches (%glob-walk comps (list root) need-dir-last)))
+        (sort (if absolutep
+                  matches
+                  ;; make each match relative to the pattern's base directory
+                  (mapcar (lambda (p) (pathname (enough-namestring p directory))) matches))
+              #'string< :key #'namestring))
     (error () nil)))
 
 ;;; ---------------------------------------------------------------------------
