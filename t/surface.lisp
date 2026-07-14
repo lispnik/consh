@@ -509,6 +509,94 @@ matcher's (length name))."
     (let ((*current-directory* dir))
       (is (string= (namestring dir) (shell-eval "pwd"))))))
 
+;;; --- tilde expansion ------------------------------------------------------
+
+(test tilde-expands-to-home
+  (let ((home (string-right-trim "/" (namestring (user-homedir-pathname)))))
+    (is (string= home (consh::%expand-tilde "~")))
+    (is (string= (concatenate 'string home "/notes") (consh::%expand-tilde "~/notes")))
+    (is (string= "plain" (consh::%expand-tilde "plain")))          ; no leading ~
+    (is (string= "~nosuchuser-zzz/x" (consh::%expand-tilde "~nosuchuser-zzz/x"))))) ; unknown user
+
+(test tilde-expands-in-command-args
+  ;; the whole arg pipeline expands a leading ~ (so `cat ~/x` works)
+  (let ((home (string-right-trim "/" (namestring (user-homedir-pathname)))))
+    (is (equal (list (concatenate 'string home "/a"))
+               (consh::%expand-word-arg "~/a")))))
+
+;;; --- directory stack + auto-cd --------------------------------------------
+
+(test pushd-popd-maintain-a-directory-stack
+  (let* ((base (make-temp-dir))
+         (sub (merge-pathnames "sub/" base))
+         (*current-directory* base)
+         (*previous-directory* nil)
+         (*dir-stack* '()))
+    (ensure-directories-exist sub)
+    (shell-eval "pushd sub")
+    (is (search "sub" (namestring *current-directory*)))
+    (is (= 1 (length *dir-stack*)))
+    (shell-eval "popd")
+    (is (equal (truename base) *current-directory*))
+    (is (null *dir-stack*))
+    (signals shell-parse-error (shell-eval "popd"))))              ; empty stack
+
+(test auto-cd-changes-into-a-bare-directory-name
+  (let* ((base (make-temp-dir))
+         (sub (merge-pathnames "workspace/" base))
+         (*current-directory* base)
+         (*previous-directory* nil))
+    (ensure-directories-exist sub)
+    ;; a lone existing-directory name desugars to a `cd` builtin
+    (let ((form (parse-shell-line "workspace")))
+      (is (eq '%builtin (first form)))
+      (is (string= "cd" (second form))))
+    (shell-eval "workspace")
+    (is (equal (truename sub) *current-directory*))
+    ;; a non-directory word is NOT auto-cd'd
+    (is (not (eq '%builtin (first (parse-shell-line "definitely-not-a-dir-zzz")))))
+    ;; and auto-cd can be turned off
+    (let ((*auto-cd* nil))
+      (is (not (eq '%builtin (first (parse-shell-line "workspace"))))))))
+
+;;; --- help / type / which / source ----------------------------------------
+
+(test help-lists-builtins-and-describes-one
+  (is (search "change directory" (first (%builtin "help" '("cd")))))
+  (is (search "not a builtin" (first (%builtin "help" '("bogus-zzz")))))
+  (let ((all (%builtin "help" nil)))
+    (is (search "consh builtins" (first all)))
+    (is (some (lambda (l) (search "pushd" l)) all))))
+
+(test type-classifies-names
+  (is (search "shell builtin" (first (%builtin "type" '("cd")))))
+  (is (search "not found" (first (%builtin "type" '("no-such-cmd-zzz")))))
+  (let ((*aliases* (make-hash-table :test 'equal)))
+    (define-alias "zz" "ls -l")
+    (is (search "aliased" (first (%builtin "type" '("zz")))))))
+
+(test which-and-type-never-leak-on-wild-names
+  "A name that parses as a wild pathname (e.g. \"[!]\") must not crash $PATH
+lookup — probe-file/truename would signal on it."
+  (finishes (consh::%find-on-path "[!]"))
+  (finishes (%builtin "which" '("[!]" "a[b]c")))
+  (finishes (%builtin "type" '("[!]"))))
+
+(test source-runs-each-line-of-a-script
+  (let ((path (merge-pathnames (format nil "consh-src-~D.consh" (sb-posix:getpid)) #P"/tmp/"))
+        (*aliases* (make-hash-table :test 'equal))
+        (*current-directory* (truename #P"/tmp/")))
+    (unwind-protect
+         (progn
+           (with-open-file (s path :direction :output :if-exists :supersede)
+             (write-line "# a comment line is skipped" s)
+             (write-line "(define-alias \"gg\" \"grep\")" s)
+             (write-line "" s))
+           (shell-eval (format nil "source ~A" (namestring path)))
+           (is (string= "grep" (gethash "gg" *aliases*))))
+      (ignore-errors (delete-file path)))
+    (signals shell-parse-error (shell-eval "source /no/such/file/zzz.consh"))))
+
 (test export-and-unset
   (unwind-protect
        (progn

@@ -318,10 +318,26 @@ nothing (the caller keeps the word literal) — never a raw pathname-parse error
 ;;; Parsing a command line into a Lisp form
 ;;; ---------------------------------------------------------------------------
 
+(defun %expand-tilde (word)
+  "Expand a leading ~ / ~user to a home directory: `~` or `~/x` to the current
+user's home, `~name` / `~name/x` to NAME's home.  A word not starting with `~`,
+or a `~name` for an unknown user, is returned unchanged (bash behaviour)."
+  (if (and (plusp (length word)) (char= (char word 0) #\~))
+      (let* ((slash (position #\/ word))
+             (name  (subseq word 1 slash))
+             (rest  (if slash (subseq word slash) ""))
+             (home  (if (zerop (length name))
+                        (namestring (user-homedir-pathname))
+                        (ignore-errors (sb-posix:passwd-dir (sb-posix:getpwnam name))))))
+        (if home
+            (concatenate 'string (string-right-trim "/" home) rest)
+            word))
+      word))
+
 (defun %expand-word-arg (word)
-  "Expand a bare word into arg strings: $VAR first, then glob.  A glob that
-matches nothing stays literal (bash default)."
-  (let ((expanded (%expand-vars word)))
+  "Expand a bare word into arg strings: leading ~ then $VAR then glob.  A glob
+that matches nothing stays literal (bash default)."
+  (let ((expanded (%expand-vars (%expand-tilde word))))
     (if (%glob-chars-p expanded)
         (let ((matches (glob expanded)))
           (if matches (mapcar #'namestring matches) (list expanded)))
@@ -390,16 +406,34 @@ command-line ORDER (fd duplication depends on it) — each is one of:
             `(external ,@args :redirections ',redirs)
             (cons 'external args))))))
 
+(defvar *auto-cd* t
+  "When true, a bare line naming an existing directory (and nothing else) changes
+to it, as if `cd DIR` — but only when the name is not also a builtin, wrapper, or
+$PATH command.")
+
+(defun %safe-probe (pathspec)
+  "probe-file that never signals — PATHSPEC may be a wild or otherwise invalid
+namestring (e.g. one containing `[`), which raw probe-file/truename would error
+on."
+  (ignore-errors (probe-file pathspec)))
+
+(defun %directory-arg-p (word)
+  "True when WORD names an existing directory relative to *current-directory*."
+  (let ((p (%safe-probe (merge-pathnames (%ensure-directory-pathname word)
+                                         *current-directory*))))
+    (and p (%dir-pathname-p p))))
+
 (defun parse-shell-line (line)
   "Desugar a command LINE into a Lisp form that runs it.  NIL for a blank line.
 A single-stage foreground command whose name is a builtin desugars to a builtin
-call; everything else desugars to a pipeline run."
+call; a bare existing-directory name auto-cds; everything else desugars to a
+pipeline run."
   (let ((tokens (tokenize line)))
     (when (null tokens) (return-from parse-shell-line nil))
     (let* ((background (eq (caar (last tokens)) :amp))
            (tokens (if background (butlast tokens) tokens))
            (stages (%split-pipe tokens)))
-      ;; single-stage foreground builtin?
+      ;; single-stage foreground builtin, or auto-cd?
       (when (and (= 1 (length stages)) (not background))
         (let* ((toks (%expand-alias (first stages)))
                (head (first toks))
@@ -408,7 +442,19 @@ call; everything else desugars to a pipeline run."
             (multiple-value-bind (arg-toks redirs) (%split-redirects (rest toks))
               (declare (ignore redirs))          ; builtins ignore redirections
               (return-from parse-shell-line
-                (list '%builtin name (cons 'list (%expand-stage-args arg-toks))))))))
+                (list '%builtin name (cons 'list (%expand-stage-args arg-toks))))))
+          ;; auto-cd: a lone non-glob token that resolves to a directory and is
+          ;; not a command (a glob is left to normal expansion, not auto-cd)
+          (when (and *auto-cd* head (eq (car head) :word) (null (rest toks))
+                     (not (%glob-chars-p (cdr head))))
+            (let ((words (%expand-word-arg (cdr head))))
+              (when (and (= 1 (length words))
+                         (%directory-arg-p (first words))
+                         (not (builtin-p name))
+                         (not (nth-value 1 (gethash name *wrappers*)))
+                         (not (%find-on-path name)))
+                (return-from parse-shell-line
+                  (list '%builtin "cd" (list 'list (first words)))))))))
       (list '%shell-run
             (cons 'list (mapcar #'%stage->form stages))
             :background background))))
@@ -477,20 +523,44 @@ or for a pure-Lisp pipeline (no process group).  Records the exit status in
       (let ((id (parse-integer (string-left-trim "%" spec) :junk-allowed t)))
         (and id (find-job id)))))
 
+(defun %cd-to (dir)
+  "Switch *current-directory* to DIR (resolved against the current directory),
+recording *previous-directory*.  Signals a shell-parse-error if it doesn't exist.
+Returns the new truename."
+  (let ((new (handler-case
+                 (truename (merge-pathnames (%ensure-directory-pathname dir)
+                                            *current-directory*))
+               (file-error () (error 'shell-parse-error :line
+                                     (format nil "cd: no such directory: ~A" dir))))))
+    (setf *previous-directory* *current-directory*
+          *current-directory* new)
+    new))
+
+(defun %cdpath-search (arg)
+  "If ARG is a bare relative name (no `/`, not `.`/`..`) that isn't present in the
+current directory but is found under a $CDPATH entry, return that path; else NIL."
+  (unless (or (find #\/ arg) (string= arg ".") (string= arg ".."))
+    (let ((cdpath (sb-ext:posix-getenv "CDPATH")))
+      (when cdpath
+        (loop for dir in (%split-string cdpath #\:)
+              thereis (and (plusp (length dir))
+                           (let ((p (%safe-probe (merge-pathnames (%ensure-directory-pathname arg)
+                                                                 (%as-directory dir)))))
+                             (and p (namestring p)))))))))
+
 (define-builtin "cd"
   (lambda (args)
-    (let ((dir (cond ((null args) (namestring (user-homedir-pathname)))
-                     ((and (string= (first args) "-") *previous-directory*)
-                      (namestring *previous-directory*))
-                     (t (first args)))))
-      (let ((new (handler-case
-                     (truename (merge-pathnames (%ensure-directory-pathname dir)
-                                                *current-directory*))
-                   (file-error () (error 'shell-parse-error :line
-                                         (format nil "cd: no such directory: ~A" dir))))))
-        (setf *previous-directory* *current-directory*
-              *current-directory* new)
-        (namestring new)))))
+    (let* ((arg (first args))
+           (target
+             (cond ((null arg) (namestring (user-homedir-pathname)))
+                   ((and (string= arg "-") *previous-directory*)
+                    (namestring *previous-directory*))
+                   ;; a bare name not in cwd may live under $CDPATH
+                   ((and (not (%safe-probe (merge-pathnames (%ensure-directory-pathname arg)
+                                                           *current-directory*)))
+                         (%cdpath-search arg)))
+                   (t arg))))
+      (namestring (%cd-to target)))))
 
 (define-builtin "pwd" (lambda (args) (declare (ignore args))
                         (namestring *current-directory*)))
@@ -586,6 +656,124 @@ the signal, defaulting to SIGTERM."
 (define-builtin "history"
   (lambda (args) (declare (ignore args))
     (loop for i below (history-count) collect (cons i (history-form i)))))
+
+;;; --- directory stack: pushd / popd / dirs --------------------------------
+
+(defvar *dir-stack* '()
+  "Directory stack for pushd/popd, most-recently-pushed first; excludes the
+current directory (which is always the stack's implicit top).")
+
+(defun %dirs-list ()
+  "The directory stack for display: current directory first, then pushed dirs."
+  (cons (namestring *current-directory*) (mapcar #'namestring *dir-stack*)))
+
+(define-builtin "pushd"
+  (lambda (args)
+    (let ((arg (first args)))
+      (if (null arg)
+          ;; no argument: swap the current directory with the top of the stack
+          (if *dir-stack*
+              (let ((cur *current-directory*))
+                (%cd-to (namestring (pop *dir-stack*)))
+                (push cur *dir-stack*))
+              (error 'shell-parse-error :line "pushd: directory stack empty"))
+          (progn (push *current-directory* *dir-stack*)
+                 (%cd-to arg))))
+    (%dirs-list)))
+
+(define-builtin "popd"
+  (lambda (args) (declare (ignore args))
+    (if *dir-stack*
+        (progn (%cd-to (namestring (pop *dir-stack*))) (%dirs-list))
+        (error 'shell-parse-error :line "popd: directory stack empty"))))
+
+(define-builtin "dirs" (lambda (args) (declare (ignore args)) (%dirs-list)))
+
+;;; --- discoverability: help / type / which --------------------------------
+
+(defparameter *builtin-docs*
+  '(("cd"      . "cd [DIR]         change directory (handles ~, -, CDPATH; no arg = home)")
+    ("pwd"     . "pwd              print the current directory")
+    ("pushd"   . "pushd [DIR]      cd to DIR, pushing the current dir onto the stack")
+    ("popd"    . "popd             cd to the directory popped off the stack")
+    ("dirs"    . "dirs             list the directory stack")
+    ("export"  . "export N=V ...   set environment variables")
+    ("unset"   . "unset NAME ...   remove environment variables")
+    ("alias"   . "alias [N=V ...]  define or list aliases")
+    ("unalias" . "unalias N ...    remove aliases")
+    ("jobs"    . "jobs             list background/stopped jobs")
+    ("fg"      . "fg [%JOB]        resume a job in the foreground")
+    ("bg"      . "bg [%JOB]        resume a job in the background")
+    ("kill"    . "kill [-SIG] JOB  signal a job")
+    ("wait"    . "wait [JOB]       wait for a job (or all jobs) to finish")
+    ("history" . "history          list past command forms")
+    ("source"  . "source FILE      run each line of FILE as shell input (also `.`)")
+    ("type"    . "type NAME ...    report how each NAME resolves")
+    ("which"   . "which NAME ...   print the path of each external NAME")
+    ("help"    . "help [NAME ...]  list builtins, or describe the named ones")
+    ("exit"    . "exit [N]         leave the shell"))
+  "One-line help for each builtin, shown by the `help` builtin.")
+
+(define-builtin "help"
+  (lambda (args)
+    (if args
+        (loop for name in args
+              collect (or (cdr (assoc name *builtin-docs* :test #'string=))
+                          (format nil "~A: not a builtin" name)))
+        (cons "consh builtins (help NAME for one):"
+              (sort (loop for k being the hash-keys of *builtins*
+                          collect (or (cdr (assoc k *builtin-docs* :test #'string=)) k))
+                    #'string<)))))
+
+(defun %find-on-path (name)
+  "First executable path for NAME: if NAME contains `/`, resolve it directly;
+otherwise search $PATH.  Returns a namestring or NIL."
+  (if (find #\/ name)
+      (let ((p (%safe-probe (merge-pathnames name *current-directory*))))
+        (and p (namestring p)))
+      (let ((path (sb-ext:posix-getenv "PATH")))
+        (when path
+          (loop for dir in (%split-string path #\:)
+                thereis (and (plusp (length dir))
+                             (let ((p (%safe-probe (merge-pathnames name (%as-directory dir)))))
+                               (and p (namestring p)))))))))
+
+(defun %classify-command (name)
+  "A human-readable line describing how NAME resolves at the prompt."
+  (cond
+    ((builtin-p name) (format nil "~A is a shell builtin" name))
+    ((gethash name *aliases*)
+     (format nil "~A is aliased to `~A'" name (gethash name *aliases*)))
+    ((nth-value 1 (gethash name *wrappers*))
+     (format nil "~A is a wrapped command~@[ (~A)~]" name (%find-on-path name)))
+    (t (let ((path (%find-on-path name)))
+         (if path (format nil "~A is ~A" name path)
+             (format nil "~A: not found" name))))))
+
+(define-builtin "type" (lambda (args) (mapcar #'%classify-command args)))
+
+(define-builtin "which"
+  (lambda (args)
+    (loop for name in args
+          collect (or (%find-on-path name) (format nil "~A: not found" name)))))
+
+;;; --- source: run a script of shell lines ---------------------------------
+
+(define-builtin "source"
+  (lambda (args)
+    (let ((file (and args (probe-file (merge-pathnames (%expand-tilde (first args))
+                                                       *current-directory*)))))
+      (unless file
+        (error 'shell-parse-error :line
+               (format nil "source: no such file: ~A" (or (first args) ""))))
+      (with-open-file (s file)
+        (loop for line = (read-line s nil nil) while line
+              for trimmed = (string-trim '(#\Space #\Tab) line)
+              unless (or (zerop (length trimmed)) (char= (char trimmed 0) #\#))
+                do (shell-eval line)))
+      (values))))
+
+(define-builtin "." (builtin "source"))
 
 ;;; ---------------------------------------------------------------------------
 ;;; History (SPEC §1: a sequence of (form . result), results hold live objects)

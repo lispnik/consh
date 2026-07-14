@@ -160,6 +160,7 @@
    ;; builtins, $VAR expansion, globbing
    #:*builtins* #:define-builtin #:builtin #:builtin-p #:%builtin
    #:shell-exit #:shell-exit-code #:*previous-directory*
+   #:*dir-stack* #:*auto-cd*
    #:%expand-vars #:glob
    #:*aliases* #:define-alias #:remove-alias
    #:*history* #:record-history #:history-count #:history-ref #:history-form
