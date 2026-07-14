@@ -503,6 +503,42 @@ desugared command.  Records (form . result) in *history*.  Returns
           (values result form)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; User init file (SPEC §1: the environment is the image — configure it in Lisp)
+;;; ---------------------------------------------------------------------------
+;;;
+;;; Loaded once at REPL startup: plain Lisp evaluated in the CONSH package, so it
+;;; can define aliases, set *prompt-function*, register wrappers, define builtins.
+;;; Location: $XDG_CONFIG_HOME/consh/consh.lisp, else ~/.config/consh/consh.lisp.
+
+(defvar *load-init-file* t
+  "When NIL, the REPL skips loading the user init file.")
+
+(defun %config-home ()
+  "The XDG config directory: $XDG_CONFIG_HOME if set, else ~/.config/."
+  (let ((xdg (sb-ext:posix-getenv "XDG_CONFIG_HOME")))
+    (if (and xdg (plusp (length xdg)))
+        (pathname (%ensure-directory-pathname xdg))
+        (merge-pathnames ".config/" (user-homedir-pathname)))))
+
+(defun init-file-path ()
+  "Pathname of the user init file (whether or not it exists)."
+  (merge-pathnames "consh/consh.lisp" (%config-home)))
+
+(defun load-init-file (&key (path (init-file-path)))
+  "Load the user init file at PATH (in the CONSH package) if it exists.  Any
+error is reported and swallowed — a broken init file must never stop the shell
+from starting.  Returns the truename loaded, or NIL if there was no file."
+  (let ((file (probe-file path)))
+    (when file
+      (handler-case
+          (let ((*package* (find-package '#:consh)))
+            (load file)
+            file)
+        (serious-condition (e)
+          (format *error-output* "~&consh: error loading ~A:~%  ~A~%" file e)
+          nil)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Prompt (SPEC §1: the prompt is a function)
 ;;; ---------------------------------------------------------------------------
 

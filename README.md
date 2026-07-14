@@ -18,7 +18,7 @@ POSIX-compliant: there is no string `eval`, no word-splitting layer — argument
 are Lisp values and globbing returns pathnames.
 
 Built on SBCL in the phase order of [`SPEC.md`](SPEC.md), each phase ending with
-its FiveAM suite green (**1268 checks**).
+its FiveAM suite green (**1279 checks**).
 
 ```
                  bytes                         objects
@@ -92,6 +92,17 @@ sbcl                   # run inside the cloned repo
 
 Run the tests with `make test` (or
 `sbcl --non-interactive --eval '(asdf:test-system :consh)'`).
+
+**Configuration** is just Lisp. At startup consh loads
+`~/.config/consh/consh.lisp` (or `$XDG_CONFIG_HOME/consh/consh.lisp`) in the
+`consh` package — define aliases, set the prompt, register wrappers, add
+builtins. A broken init file is reported and skipped, never blocking startup.
+
+```lisp
+;; ~/.config/consh/consh.lisp
+(define-alias "ll" "ls -l")
+(setf *prompt-function* (lambda () (format nil "~A> " (pathname-name *current-directory*))))
+```
 
 
 ## The idea: objects, not bytes

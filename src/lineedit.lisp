@@ -254,6 +254,9 @@ line (or, mid-command, tears the job down); Ctrl-D / EOF ends the loop."
    (setf *current-directory* (truename (pathname (format nil "~A/" (sb-posix:getcwd))))))
   (format t "consh — a Common Lisp Unix shell (objects, not bytes). Ctrl-D to exit.~%")
   (finish-output)
+  ;; Load ~/.config/consh/consh.lisp (aliases, prompt, wrappers) — a broken init
+  ;; file reports and is swallowed, never blocking startup.
+  (when *load-init-file* (load-init-file))
   ;; Take the controlling terminal (if stdin is a tty) so fg/bg can hand it to
   ;; jobs — a no-op under a pipe or without a tty.
   (enable-terminal-job-control 0)

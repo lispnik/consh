@@ -164,6 +164,8 @@
    #:*history* #:record-history #:history-count #:history-ref #:history-form
    #:history-result #:last-result #:clear-history
    #:*prompt-function* #:default-prompt #:prompt
+   ;; user init file
+   #:*load-init-file* #:init-file-path #:load-init-file
    #:complete #:complete-line
    ;; line editor
    #:*line-history* #:record-line #:make-ledit #:ledit #:ledit-text #:ledit-point

@@ -105,6 +105,54 @@ the terminal-handoff path is skipped."
 (test eval-bare-lisp-form
   (is (= 42 (shell-eval "(+ 40 2)"))))
 
+;;; ---------------------------------------------------------------------------
+;;; User init file
+;;; ---------------------------------------------------------------------------
+
+(test init-file-path-honors-xdg-config-home
+  (let ((saved (sb-ext:posix-getenv "XDG_CONFIG_HOME")))
+    (unwind-protect
+         (progn
+           (sb-posix:setenv "XDG_CONFIG_HOME" "/tmp/consh-xdg" 1)
+           (is (equal "/tmp/consh-xdg/consh/consh.lisp"
+                      (namestring (init-file-path)))))
+      (if saved (sb-posix:setenv "XDG_CONFIG_HOME" saved 1)
+          (sb-posix:unsetenv "XDG_CONFIG_HOME")))))
+
+(test init-file-path-defaults-under-home
+  (let ((saved (sb-ext:posix-getenv "XDG_CONFIG_HOME")))
+    (unwind-protect
+         (progn
+           (sb-posix:unsetenv "XDG_CONFIG_HOME")
+           (is (search ".config/consh/consh.lisp" (namestring (init-file-path)))))
+      (when saved (sb-posix:setenv "XDG_CONFIG_HOME" saved 1)))))
+
+(test load-init-file-missing-returns-nil
+  (is (null (load-init-file :path #p"/consh-nonexistent-dir-xyz/consh.lisp"))))
+
+(test load-init-file-evaluates-in-consh-package
+  "The init file is loaded in the CONSH package, so it configures the shell —
+here it defines an alias, unqualified."
+  (let* ((dir (make-temp-dir))
+         (file (merge-pathnames "consh.lisp" dir)))
+    (with-open-file (s file :direction :output)
+      (write-line "(define-alias \"initgrep\" \"grep -i\")" s))
+    (unwind-protect
+         (progn
+           (is-true (load-init-file :path file))
+           (is (equal "grep -i" (gethash "initgrep" *aliases*))))
+      (remove-alias "initgrep"))))
+
+(test load-init-file-swallows-errors
+  "A broken init file is reported and swallowed — never fatal to startup."
+  (let* ((dir (make-temp-dir))
+         (file (merge-pathnames "consh.lisp" dir)))
+    (with-open-file (s file :direction :output)
+      (write-line "(error \"boom in init file\")" s))
+    ;; returns NIL and does not signal
+    (is (null (let ((*error-output* (make-broadcast-stream)))   ; hush the report
+                (load-init-file :path file))))))
+
 (test eval-lisp-line-reaches-consh-vocabulary
   "A Lisp line read in the CONSH package (as the dumped-image REPL binds it) can
 name the shell's own vocabulary unqualified — pipe, pipeline-collect, external."
