@@ -60,6 +60,54 @@
     (is (string= "" (ledit-text ed)))
     (is (= 0 (ledit-point ed)))))
 
+(test word-motion-moves-by-words
+  (let ((ed (make-ledit)))
+    (type-string ed "foo bar baz")               ; point at end (11)
+    (ledit-key ed :back-word) (is (= 8 (ledit-point ed)))   ; start of "baz"
+    (ledit-key ed :back-word) (is (= 4 (ledit-point ed)))   ; start of "bar"
+    (ledit-key ed :forward-word) (is (= 7 (ledit-point ed))) ; end of "bar"
+    (ledit-key ed :home)
+    (ledit-key ed :forward-word) (is (= 3 (ledit-point ed))))) ; end of "foo"
+
+(test kill-word-back-and-forward
+  (let ((consh:*kill-ring* '()))
+    (let ((ed (make-ledit)))
+      (type-string ed "alpha beta gamma")         ; point at end
+      (ledit-key ed :kill-word-back)              ; removes "gamma"
+      (is (string= "alpha beta " (ledit-text ed)))
+      (is (string= "gamma" (first consh:*kill-ring*)))
+      (ledit-key ed :home)
+      (ledit-key ed :kill-word-forward)           ; removes "alpha"
+      (is (string= " beta " (ledit-text ed)))
+      (is (string= "alpha" (first consh:*kill-ring*))))))
+
+(test yank-reinserts-the-last-kill
+  (let ((consh:*kill-ring* '()))
+    (let ((ed (make-ledit)))
+      (type-string ed "keep this")
+      (ledit-key ed :kill-line)                   ; ring gets "keep this"
+      (is (string= "" (ledit-text ed)))
+      (type-string ed "x ")
+      (ledit-key ed :yank)                        ; paste it back at point
+      (is (string= "x keep this" (ledit-text ed)))
+      (is (= 11 (ledit-point ed))))))
+
+(test kill-to-end-feeds-the-ring
+  (let ((consh:*kill-ring* '()))
+    (let ((ed (make-ledit)))
+      (type-string ed "abcdef")
+      (ledit-key ed :home) (dotimes (i 3) (ledit-key ed :right))
+      (ledit-key ed :kill-to-end)                 ; kills "def"
+      (is (string= "abc" (ledit-text ed)))
+      (is (string= "def" (first consh:*kill-ring*))))))
+
+(test transpose-swaps-characters
+  (let ((ed (make-ledit)))
+    (type-string ed "acb")
+    (ledit-key ed :left)                          ; point between c and b (index 2)
+    (ledit-key ed :transpose)                     ; swap c and b -> "abc"
+    (is (string= "abc" (ledit-text ed)))))
+
 (test boundary-moves-are-safe
   (let ((ed (make-ledit)))
     (ledit-key ed :left) (ledit-key ed :backspace) (ledit-key ed :delete) (ledit-key ed :right)
@@ -174,11 +222,22 @@ does NOT leak as literal inserts."
   (is (equal (list :delete #\q) (%keys-from (format nil "~C[3~Cq" #\Escape #\~)))))
 
 (test unhandled-escape-and-control-chars-are-ignored
-  "PageUp (ESC[5~) and a stray control char (^W) are ignored (:redraw), and the
+  "PageUp (ESC[5~) and a stray control char (^G) are ignored (:redraw), and the
 following printable char is read normally."
   (is (equal (list :redraw #\y) (%keys-from (format nil "~C[5~Cy" #\Escape #\~))))
-  (is (equal (list :redraw #\z) (%keys-from (format nil "~Cz" (code-char 23)))))  ; ^W
+  (is (equal (list :redraw #\z) (%keys-from (format nil "~Cz" (code-char 7)))))   ; ^G
   (is (equal (list #\a) (%keys-from "a"))))        ; a printable char still inserts
+
+(test emacs-control-and-meta-keys-decode
+  "The editing keys added for word-wise editing decode from their bytes."
+  (is (equal (list :kill-word-back)    (%keys-from (string (code-char 23)))))  ; ^W
+  (is (equal (list :yank)              (%keys-from (string (code-char 25)))))  ; ^Y
+  (is (equal (list :clear)             (%keys-from (string (code-char 12)))))  ; ^L
+  (is (equal (list :transpose)         (%keys-from (string (code-char 20)))))  ; ^T
+  ;; Meta (ESC-prefixed) word keys
+  (is (equal (list :back-word)         (%keys-from (format nil "~Cb" #\Escape))))
+  (is (equal (list :forward-word)      (%keys-from (format nil "~Cf" #\Escape))))
+  (is (equal (list :kill-word-forward) (%keys-from (format nil "~Cd" #\Escape)))))
 
 (test save-termios-is-nil-for-a-non-terminal
   "save-termios on a pipe fd yields NIL (not a terminal), and restore-termios of

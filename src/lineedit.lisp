@@ -62,8 +62,87 @@
 (defun ledit-right (ed) (when (< (ledit-point ed) (length (ledit-text ed))) (incf (ledit-point ed))))
 (defun ledit-home  (ed) (setf (ledit-point ed) 0))
 (defun ledit-end   (ed) (setf (ledit-point ed) (length (ledit-text ed))))
-(defun ledit-kill-to-end (ed) (setf (ledit-text ed) (subseq (ledit-text ed) 0 (ledit-point ed))))
-(defun ledit-kill-line (ed) (setf (ledit-text ed) "" (ledit-point ed) 0))
+;;; --- kill-ring + word-wise editing ---------------------------------------
+
+(defvar *kill-ring* '()
+  "Recently killed text, most-recent first; ^Y (yank) inserts the head.  Kills
+from ^K/^U/^W/M-d push here.  Shared across lines so text killed on one line can
+be yanked on the next.")
+
+(defparameter *kill-ring-max* 60 "Cap on retained kill-ring entries.")
+
+(defun %kill-record (string)
+  "Push non-empty STRING onto *KILL-RING*, trimming to *KILL-RING-MAX*."
+  (when (plusp (length string))
+    (push string *kill-ring*)
+    (when (> (length *kill-ring*) *kill-ring-max*)
+      (setf *kill-ring* (subseq *kill-ring* 0 *kill-ring-max*)))))
+
+(defun ledit-kill-to-end (ed)
+  "^K: kill from point to end of line."
+  (%kill-record (subseq (ledit-text ed) (ledit-point ed)))
+  (setf (ledit-text ed) (subseq (ledit-text ed) 0 (ledit-point ed))))
+
+(defun ledit-kill-line (ed)
+  "^U: kill the whole line."
+  (%kill-record (ledit-text ed))
+  (setf (ledit-text ed) "" (ledit-point ed) 0))
+
+(defun ledit-yank (ed)
+  "^Y: insert the most recent kill at point."
+  (let ((s (first *kill-ring*)))
+    (when s
+      (let ((p (ledit-point ed)))
+        (setf (ledit-text ed) (concatenate 'string (subseq (ledit-text ed) 0 p)
+                                           s (subseq (ledit-text ed) p))
+              (ledit-point ed) (+ p (length s)))))))
+
+(defun %word-char-p (c) (alphanumericp c))
+
+(defun %forward-word-index (text point)
+  "Index after the word at/after POINT: skip separators, then word chars."
+  (let ((n (length text)) (i point))
+    (loop while (and (< i n) (not (%word-char-p (char text i)))) do (incf i))
+    (loop while (and (< i n) (%word-char-p (char text i))) do (incf i))
+    i))
+
+(defun %backward-word-index (text point)
+  "Index at the start of the word before POINT: skip separators back, then word
+chars back."
+  (let ((i point))
+    (loop while (and (> i 0) (not (%word-char-p (char text (1- i))))) do (decf i))
+    (loop while (and (> i 0) (%word-char-p (char text (1- i)))) do (decf i))
+    i))
+
+(defun ledit-forward-word (ed)      ; M-f
+  (setf (ledit-point ed) (%forward-word-index (ledit-text ed) (ledit-point ed))))
+
+(defun ledit-backward-word (ed)     ; M-b
+  (setf (ledit-point ed) (%backward-word-index (ledit-text ed) (ledit-point ed))))
+
+(defun ledit-kill-word-forward (ed) ; M-d
+  (let* ((text (ledit-text ed)) (p (ledit-point ed))
+         (end (%forward-word-index text p)))
+    (when (> end p)
+      (%kill-record (subseq text p end))
+      (setf (ledit-text ed) (concatenate 'string (subseq text 0 p) (subseq text end))))))
+
+(defun ledit-kill-word-back (ed)    ; ^W / M-DEL
+  (let* ((text (ledit-text ed)) (p (ledit-point ed))
+         (start (%backward-word-index text p)))
+    (when (< start p)
+      (%kill-record (subseq text start p))
+      (setf (ledit-text ed) (concatenate 'string (subseq text 0 start) (subseq text p))
+            (ledit-point ed) start))))
+
+(defun ledit-transpose (ed)         ; ^T: swap the two chars around point
+  (let* ((text (copy-seq (ledit-text ed))) (n (length text)) (p (ledit-point ed)))
+    (when (>= n 2)
+      (let ((i (if (< p n) p (1- p))))       ; index of the right-hand char to swap
+        (when (>= i 1)
+          (rotatef (char text (1- i)) (char text i))
+          (setf (ledit-text ed) text
+                (ledit-point ed) (min n (1+ i))))))))
 
 (defun %ledit-set-line (ed line)
   (setf (ledit-text ed) line (ledit-point ed) (length line)))
@@ -140,6 +219,13 @@ several candidates remain (the driver lists them)."
         (:end         (ledit-end ed) :redraw)
         (:kill-to-end (ledit-kill-to-end ed) :redraw)
         (:kill-line   (ledit-kill-line ed) :redraw)
+        (:kill-word-back    (ledit-kill-word-back ed) :redraw)
+        (:kill-word-forward (ledit-kill-word-forward ed) :redraw)
+        (:back-word    (ledit-backward-word ed) :redraw)
+        (:forward-word (ledit-forward-word ed) :redraw)
+        (:yank        (ledit-yank ed) :redraw)
+        (:transpose   (ledit-transpose ed) :redraw)
+        (:clear       :clear)               ; ^L — driver clears the screen, repaints
         (:prev        (ledit-history-prev ed) :redraw)
         (:next        (ledit-history-next ed) :redraw)
         (:tab         (ledit-complete ed))
@@ -240,15 +326,26 @@ signal-interrupted syscalls when FD is given."
       ((char= c (code-char 5)) :end)             ; ^E
       ((char= c (code-char 11)) :kill-to-end)    ; ^K
       ((char= c (code-char 21)) :kill-line)      ; ^U
+      ((char= c (code-char 23)) :kill-word-back) ; ^W
+      ((char= c (code-char 25)) :yank)           ; ^Y
+      ((char= c (code-char 12)) :clear)          ; ^L
+      ((char= c (code-char 20)) :transpose)      ; ^T
       ((char= c #\Tab) :tab)
       ((char= c #\Escape)
-       ;; wait briefly for a following byte: present => escape sequence; absent
-       ;; (a lone ESC key, or a signal) => ignore rather than block/corrupt
-       (if (eql (%tty-read in fd *esc-follower-ms*) #\[)
-           (%read-csi in fd)
-           :redraw))
-      ;; any other control char (^W ^B ^F ^L ^R ^T ...) is not an insertable
-      ;; character — ignore it rather than stuffing a control byte into the line
+       ;; wait briefly for a following byte: `[` => a CSI sequence; a letter =>
+       ;; a Meta (Alt) key; absent (a lone ESC key, or a signal) => ignore rather
+       ;; than block/corrupt
+       (let ((next (%tty-read in fd *esc-follower-ms*)))
+         (cond
+           ((null next) :redraw)
+           ((char= next #\[) (%read-csi in fd))
+           ((char= next #\b) :back-word)          ; M-b
+           ((char= next #\f) :forward-word)       ; M-f
+           ((char= next #\d) :kill-word-forward)  ; M-d
+           ((or (char= next #\Rubout) (char= next #\Backspace)) :kill-word-back) ; M-DEL
+           (t :redraw))))
+      ;; any other control char (^B ^F ^R ...) is not an insertable character —
+      ;; ignore it rather than stuffing a control byte into the line
       ((< (char-code c) 32) :redraw)
       (t c))))
 
@@ -294,6 +391,8 @@ Returns the line string, or NIL on EOF."
                  (:submit (format out "~%") (return (ledit-text ed)))
                  (:cancel (format out "^C~%") (%ledit-set-line ed "")
                           (setf (ledit-hidx ed) nil))
+                 (:clear (format out "~C[2J~C[H" #\Escape #\Escape)  ; ^L: wipe + home
+                         (%redraw ed prompt out))
                  (:eof (format out "~%") (return nil))
                  (t (when (and (consp action) (eq (car action) :show))
                       (format out "~%~{~A~^  ~}~%" (cdr action)))
