@@ -26,12 +26,16 @@
                                  (shell-parse-error-line c)))))
 
 (defun %read-quoted (stream quote)
-  "Read a quoted run, QUOTE already peeked.  Returns the inner string."
+  "Read a quoted run, QUOTE already peeked.  Returns the inner string.  Signals
+SHELL-PARSE-ERROR on an unterminated quote (EOF before the closing QUOTE) rather
+than silently accepting the rest of the line."
   (read-char stream)                    ; consume opening quote
-  (with-output-to-string (out)
-    (loop for c = (read-char stream nil nil)
-          until (or (null c) (char= c quote))
-          do (write-char c out))))
+  (let ((out (make-string-output-stream)))
+    (loop for c = (read-char stream nil nil) do
+      (cond ((null c) (error 'shell-parse-error
+                             :line (format nil "unterminated ~C quote" quote)))
+            ((char= c quote) (return (get-output-stream-string out)))
+            (t (write-char c out))))))
 
 (defparameter +word-delimiters+ '(#\Space #\Tab #\Newline #\| #\& #\< #\>))
 
@@ -254,25 +258,53 @@ patterns like `**********b`."
         (if (stringp last) last ""))                 ; a directory: its name (root -> "")
       (file-namestring pathname)))
 
+(defun %dir-children (dir)
+  "Pathnames of the entries (files and subdirectories) directly under the
+directory pathname DIR; NIL if DIR cannot be listed."
+  (ignore-errors
+   (directory (merge-pathnames (make-pathname :name :wild :type :wild) dir))))
+
+(defun %dir-pathname-p (p)
+  "True if pathname P denotes a directory (no name/type, has directory parts)."
+  (and (null (pathname-name p)) (null (pathname-type p)) (pathname-directory p)))
+
+(defun %glob-walk (comps dirs need-dir-last)
+  "Expand the remaining pattern COMPS (component strings) against the candidate
+directory pathnames DIRS, returning the matching pathnames.  A component with
+glob chars is matched against each directory's entries; a literal one is probed.
+Any component that is not the last, and the last one when NEED-DIR-LAST (a
+trailing `/`), keeps only directories — so we can descend and so `*/` yields only
+directories."
+  (if (null comps)
+      dirs
+      (let* ((comp (first comps)) (more (rest comps))
+             (need-dir (or more need-dir-last))
+             (out '()))
+        (dolist (dir dirs)
+          (if (%glob-chars-p comp)
+              (dolist (child (%dir-children dir))
+                (when (and (%glob-match-p comp (%basename child))
+                           (or (not need-dir) (%dir-pathname-p child)))
+                  (push child out)))
+              (let ((child (probe-file (merge-pathnames comp dir))))
+                (when (and child (or (not need-dir) (%dir-pathname-p child)))
+                  (push child out)))))
+        (%glob-walk more (nreverse out) need-dir-last))))
+
 (defun glob (pattern &key (directory *current-directory*))
-  "Return the pathnames under DIRECTORY matching shell PATTERN (`*` `?` `[set]`),
-sorted.  A pattern with a directory part globs its basename in that
-subdirectory.  Resolves against *current-directory*, never the process cwd.  A
+  "Return the pathnames matching shell PATTERN (`*` `?` `[set]`), sorted.  EACH
+path component may be a glob — `*/`, `*/foo`, `src/*/x` all expand — walking the
+filesystem component by component from DIRECTORY (or `/` for an absolute
+pattern).  Resolves against *current-directory*, never the process cwd.  A
 PATTERN that is not a valid pathname simply matches nothing (the caller keeps the
 word literal) — never a raw pathname-parse error."
   (handler-case
-      (let* ((slash (position #\/ pattern :from-end t))
-             (subdir (if slash (subseq pattern 0 (1+ slash)) ""))
-             (base-pat (if slash (subseq pattern (1+ slash)) pattern))
-             (base (merge-pathnames subdir directory))
-             (entries (ignore-errors
-                       (directory (merge-pathnames (make-pathname :name :wild :type :wild)
-                                                   base)))))
-        (sort (loop for p in entries
-                    when (%glob-match-p base-pat (%basename p))
-                      collect (merge-pathnames (concatenate 'string subdir (%basename p))
-                                               directory))
-              #'string< :key #'namestring))
+      (let* ((n (length pattern))
+             (absolutep (and (plusp n) (char= (char pattern 0) #\/)))
+             (need-dir-last (and (plusp n) (char= (char pattern (1- n)) #\/)))
+             (comps (remove "" (%split-string pattern #\/) :test #'string=))
+             (root (if absolutep #p"/" (pathname directory))))
+        (sort (%glob-walk comps (list root) need-dir-last) #'string< :key #'namestring))
     (error () nil)))
 
 ;;; ---------------------------------------------------------------------------

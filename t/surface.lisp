@@ -301,6 +301,24 @@ name the shell's own vocabulary unqualified — pipe, pipeline-collect, external
     (is (equal '("x.txt")
                (mapcar #'file-namestring (glob "sub/*.txt" :directory dir))))))
 
+(test glob-expands-directory-components
+  "A glob in a NON-final path component (`*/x`, `d*/x`) is expanded, and a
+trailing `/` (`*/`) restricts matches to directories."
+  (let ((dir (make-temp-dir)))
+    (ensure-directories-exist (merge-pathnames "d1/" dir))
+    (ensure-directories-exist (merge-pathnames "d2/" dir))
+    (dolist (p '("d1/x.txt" "d2/x.txt" "top.txt"))
+      (with-open-file (s (merge-pathnames p dir) :direction :output) (write-string "x" s)))
+    ;; `*/x.txt` finds x.txt in every subdirectory
+    (is (equal '("x.txt" "x.txt")
+               (mapcar #'file-namestring (glob "*/x.txt" :directory dir))))
+    (is (equal '("x.txt" "x.txt")
+               (mapcar #'file-namestring (glob "d*/x.txt" :directory dir))))
+    ;; `*/` matches only directories (not the plain file top.txt)
+    (is (equal '("d1" "d2")
+               (mapcar (lambda (p) (car (last (pathname-directory p))))
+                       (glob "*/" :directory dir))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Parser hardening: malformed input yields a clean error (or literal), never a
 ;;; raw internal condition or a crash.
@@ -328,6 +346,13 @@ never a raw NAMESTRING-PARSE-ERROR / TYPE-ERROR."
   "A `&` that is not the trailing background marker is a clean error, not a raw
 CASE-FAILURE."
   (signals shell-parse-error (parse-shell-line "echo & foo")))
+
+(test unterminated-quote-is-a-clean-parse-error
+  "An unterminated quote is a clean shell-parse-error, not silently accepted."
+  (signals shell-parse-error (tokenize "echo \"hi"))
+  (signals shell-parse-error (parse-shell-line "echo 'x"))
+  ;; a properly terminated quote still groups into one word
+  (is (equal '((:word . "echo") (:word . "a b")) (tokenize "echo \"a b\""))))
 
 (test adversarial-inputs-never-raise-raw-errors
   "A batch of nasty lines must each parse or raise shell-parse-error — never a
