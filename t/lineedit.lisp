@@ -135,3 +135,44 @@
 
 (test interactive-terminal-p-false-for-non-tty
   (is (null (interactive-terminal-p (make-string-input-stream "hi")))))
+
+;;; --- driver hardening ------------------------------------------------------
+
+(test unknown-key-is-a-harmless-redraw-not-a-crash
+  "ledit-key must tolerate :redraw (which %read-key returns for unrecognized
+escapes) and any other keyword — a repaint, not a CASE-FAILURE."
+  (let ((ed (make-ledit)))
+    (is (eq :redraw (ledit-key ed :redraw)))
+    (is (eq :redraw (ledit-key ed :some-future-key)))
+    (is (string= "" (ledit-text ed)))))            ; buffer untouched
+
+(defun %keys-from (string)
+  "Read all logical keys from STRING via %read-key until :eof."
+  (with-input-from-string (s string)
+    (loop for k = (consh::%read-key s) until (eq k :eof) collect k)))
+
+(test csi-sequence-is-fully-consumed-no-tail-leak
+  "A full CSI (e.g. ctrl-right ESC[1;5C) maps to one key and its parameter tail
+does NOT leak as literal inserts."
+  (is (equal (list :right #\x)
+             (%keys-from (format nil "~C[1;5Cx" #\Escape))))
+  ;; the plain arrows still work
+  (is (equal (list :prev :next :left) (%keys-from (format nil "~C[A~C[B~C[D" #\Escape #\Escape #\Escape))))
+  ;; ESC[3~ is Delete; the trailing ~ is consumed
+  (is (equal (list :delete #\q) (%keys-from (format nil "~C[3~Cq" #\Escape #\~)))))
+
+(test unhandled-escape-and-control-chars-are-ignored
+  "PageUp (ESC[5~) and a stray control char (^W) are ignored (:redraw), and the
+following printable char is read normally."
+  (is (equal (list :redraw #\y) (%keys-from (format nil "~C[5~Cy" #\Escape #\~))))
+  (is (equal (list :redraw #\z) (%keys-from (format nil "~Cz" (code-char 23)))))  ; ^W
+  (is (equal (list #\a) (%keys-from "a"))))        ; a printable char still inserts
+
+(test save-termios-is-nil-for-a-non-terminal
+  "save-termios on a pipe fd yields NIL (not a terminal), and restore-termios of
+NIL is a safe no-op."
+  (multiple-value-bind (r w) (make-pipe)
+    (unwind-protect
+         (progn (is (null (save-termios r)))
+                (is (null (restore-termios r nil))))
+      (c-close r) (c-close w))))

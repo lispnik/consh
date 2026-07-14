@@ -24,6 +24,7 @@
    ;; signalling / groups / terminal
    #:c-kill #:c-killpg #:c-setpgid #:c-getpgid
    #:c-tcsetpgrp #:c-tcgetpgrp #:c-isatty #:with-signal-ignored
+   #:save-termios #:restore-termios
    ;; signal numbers commonly used
    #:+sigterm+ #:+sigkill+ #:+sigcont+ #:+sigstop+ #:+sigtstp+ #:+sigint+ #:+sigchld+
    #:+sigttin+ #:+sigttou+))

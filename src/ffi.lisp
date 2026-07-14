@@ -270,6 +270,34 @@ number.  Encoding is the classic wait(2) layout shared by Linux and macOS."
   "isatty(3): true when FD refers to a terminal."
   (= 1 (cffi:foreign-funcall "isatty" :int fd :int)))
 
+;;; termios save/restore — we treat the struct as an opaque blob (no field
+;;; access), so no platform-specific layout is needed.  +termios-size+ is a safe
+;;; superset of the struct on Linux (60) and macOS (72); tcgetattr/tcsetattr only
+;;; touch the real prefix, so the extra bytes are inert.
+(defconstant +tcsanow+ 0)               ; TCSANOW, 0 on Linux and macOS
+(defparameter +termios-size+ 128)
+
+(defun save-termios (fd)
+  "Snapshot FD's terminal attributes as an opaque byte vector, or NIL on error
+\(FD is not a terminal, etc.)."
+  (ignore-errors
+   (cffi:with-foreign-object (buf :unsigned-char +termios-size+)
+     (when (= 0 (cffi:foreign-funcall "tcgetattr" :int fd :pointer buf :int))
+       (let ((v (make-array +termios-size+ :element-type '(unsigned-byte 8))))
+         (dotimes (i +termios-size+ v)
+           (setf (aref v i) (cffi:mem-aref buf :unsigned-char i))))))))
+
+(defun restore-termios (fd saved)
+  "Restore FD's terminal attributes from a SAVED byte vector (from SAVE-TERMIOS).
+A single tcsetattr syscall — atomic, so it cannot leave the tty half-configured
+the way a preempted `stty` subprocess can.  Returns T on success, NIL otherwise."
+  (when saved
+    (ignore-errors
+     (cffi:with-foreign-object (buf :unsigned-char +termios-size+)
+       (dotimes (i +termios-size+)
+         (setf (cffi:mem-aref buf :unsigned-char i) (aref saved i)))
+       (= 0 (cffi:foreign-funcall "tcsetattr" :int fd :int +tcsanow+ :pointer buf :int))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; posix_spawn(3) + file_actions + attributes
 ;;; ---------------------------------------------------------------------------

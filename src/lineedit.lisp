@@ -128,7 +128,10 @@ several candidates remain (the driver lists them)."
 (:show . completions).  KEY is a character (insert) or a keyword."
   (if (characterp key)
       (progn (ledit-insert ed key) :redraw)
-      (ecase key
+      ;; CASE (not ECASE): an unknown key — including the :redraw that %read-key
+      ;; returns for unrecognized escape sequences — is a harmless repaint, never
+      ;; a CASE-FAILURE that would crash the editor.
+      (case key
         (:backspace   (ledit-backspace ed) :redraw)
         (:delete      (ledit-delete ed) :redraw)
         (:left        (ledit-left ed) :redraw)
@@ -142,7 +145,8 @@ several candidates remain (the driver lists them)."
         (:tab         (ledit-complete ed))
         (:enter       :submit)
         (:cancel      :cancel)
-        (:eof         (if (zerop (length (ledit-text ed))) :eof :redraw)))))
+        (:eof         (if (zerop (length (ledit-text ed))) :eof :redraw))
+        (t            :redraw))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Terminal driver (raw mode via stty; interactive tty only)
@@ -161,9 +165,31 @@ isatty(3) when the fd is available."
   "Run stty ARGS on the controlling terminal, waiting for it."
   (ignore-errors (wait-process (launch "stty" args) :timeout 2)))
 
+(defun %read-csi (in)
+  "Read a CSI sequence body (everything after `ESC[`), consuming up to AND
+INCLUDING its final byte (0x40-0x7E), then map it to a key.  Consuming the whole
+sequence is what keeps an unhandled key's tail (params, `~`, paste payload) from
+leaking into the buffer as literal characters.  Returns :redraw for anything
+unrecognized (or a truncated sequence at EOF)."
+  (let ((params (make-string-output-stream)) (final nil))
+    (loop for c = (read-char in nil nil)
+          do (cond ((null c) (return))                       ; EOF mid-sequence
+                   ((<= 64 (char-code c) 126) (setf final c) (return)) ; final byte
+                   (t (write-char c params))))               ; parameter/intermediate
+    (let ((p (get-output-stream-string params)))
+      (case final
+        (#\A :prev) (#\B :next) (#\C :right) (#\D :left)
+        (#\H :home) (#\F :end)
+        (#\~ (cond ((member p '("1" "7") :test #'string=) :home)
+                   ((member p '("4" "8") :test #'string=) :end)
+                   ((string= p "3") :delete)
+                   (t :redraw)))
+        (t :redraw)))))
+
 (defun %read-key (in)
   "Read one logical key from raw-mode stream IN: a character, or a keyword for
-control/navigation keys.  Decodes the common CSI arrow/Home/End escapes."
+control/navigation keys.  Decodes the common CSI arrow/Home/End/Delete escapes;
+unhandled control characters and escape sequences are ignored (map to :redraw)."
   (let ((c (read-char in nil nil)))
     (cond
       ((null c) :eof)
@@ -180,12 +206,11 @@ control/navigation keys.  Decodes the common CSI arrow/Home/End escapes."
       ((char= c #\Tab) :tab)
       ((char= c #\Escape)
        (if (eql (read-char in nil nil) #\[)
-           (case (read-char in nil nil)
-             (#\A :prev) (#\B :next) (#\C :right) (#\D :left)
-             (#\H :home) (#\F :end)
-             (#\3 (read-char in nil nil) :delete)  ; ESC[3~
-             (t :redraw))
-           :redraw))
+           (%read-csi in)
+           :redraw))                             ; ESC + other / EOF -> ignore
+      ;; any other control char (^W ^B ^F ^L ^R ^T ...) is not an insertable
+      ;; character — ignore it rather than stuffing a control byte into the line
+      ((< (char-code c) 32) :redraw)
       (t c))))
 
 (defun %redraw (ed prompt out)
@@ -197,7 +222,11 @@ control/navigation keys.  Decodes the common CSI arrow/Home/End escapes."
 (defun read-line-edited (prompt &key (in *standard-input*) (out *standard-output*))
   "Read a line with editing/completion/history from raw-mode terminal IN.
 Returns the line string, or NIL on EOF."
-  (let ((ed (make-ledit)))
+  (let* ((ed (make-ledit))
+         (fd (ignore-errors (sb-sys:fd-stream-fd in)))
+         ;; snapshot the exact terminal state so we can restore it with a single
+         ;; tcsetattr syscall — robust against a preempted `stty sane` subprocess
+         (saved (and fd (save-termios fd))))
     (%stty '("-echo" "-icanon" "min" "1" "time" "0"))
     (unwind-protect
          (progn
@@ -212,7 +241,10 @@ Returns the line string, or NIL on EOF."
                  (t (when (and (consp action) (eq (car action) :show))
                       (format out "~%~{~A~^  ~}~%" (cdr action)))
                     (%redraw ed prompt out))))))
-      (%stty '("sane")))))
+      ;; restore the captured attributes atomically; fall back to `stty sane`
+      ;; only if we could not snapshot them
+      (unless (and fd saved (restore-termios fd saved))
+        (%stty '("sane"))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The REPL
@@ -237,7 +269,11 @@ line (or, mid-command, tears the job down); Ctrl-D / EOF ends the loop."
     (loop
       (dolist (event (take-job-events)) (format out "~&[~A]~%" event))
       (let ((line (handler-case (%read-repl-line (prompt) interactive in out)
-                    (sb-sys:interactive-interrupt () (format out "~&^C~%") ""))))
+                    (sb-sys:interactive-interrupt () (format out "~&^C~%") "")
+                    ;; a non-interrupt error while reading (a stream error, a
+                    ;; decode error) is reported and the loop continues, rather
+                    ;; than killing the whole REPL
+                    (error (e) (format out "~&Error reading input: ~A~%" e) ""))))
         (when (null line) (return))
         (unless (zerop (length (string-trim '(#\Space #\Tab) line)))
           (record-line line)
