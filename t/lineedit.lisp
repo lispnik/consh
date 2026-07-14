@@ -176,3 +176,21 @@ NIL is a safe no-op."
          (progn (is (null (save-termios r)))
                 (is (null (restore-termios r nil))))
       (c-close r) (c-close w))))
+
+(test terminal-fd-of-unwraps-wrapper-streams
+  "%terminal-fd-of finds the fd through the SYNONYM-/TWO-WAY-STREAM wrappers that
+*standard-input* is — a plain (sb-sys:fd-stream-fd) errors on those, which is why
+the line editor used to be disabled in the dumped image."
+  (multiple-value-bind (r w) (make-pipe)
+    (let ((fds (sb-sys:make-fd-stream r :input t)))
+      (unwind-protect
+           (progn
+             (is (eql r (consh::%terminal-fd-of fds)))                ; direct fd-stream
+             (is (eql r (consh::%terminal-fd-of                       ; through two-way
+                         (make-two-way-stream fds (make-broadcast-stream)))))
+             (let ((consh::*fd-of-test-target* fds))
+               (declare (special consh::*fd-of-test-target*))
+               (is (eql r (consh::%terminal-fd-of                     ; through synonym
+                           (make-synonym-stream 'consh::*fd-of-test-target*))))))
+        (ignore-errors (close fds))
+        (ignore-errors (c-close w))))))

@@ -270,6 +270,28 @@ number.  Encoding is the classic wait(2) layout shared by Linux and macOS."
   "isatty(3): true when FD refers to a terminal."
   (= 1 (cffi:foreign-funcall "isatty" :int fd :int)))
 
+(defconstant +pollin+ 1)                ; POLLIN, 1 on Linux and macOS
+
+(defun c-poll-readable (fd timeout-ms)
+  "poll(2) FD for readable input for up to TIMEOUT-MS (-1 blocks indefinitely).
+Retries on EINTR — so a signal (e.g. the reaper's SIGCHLD) can never make this
+return spuriously.  Returns T when POLLIN is set (a byte is ready to read), NIL
+on timeout or hangup (EOF).  struct pollfd is { int fd; short events; short
+revents } — same 8-byte layout on Linux and macOS."
+  (cffi:with-foreign-object (pfd :uint8 8)
+    (setf (cffi:mem-ref pfd :int 0) fd
+          (cffi:mem-ref (cffi:inc-pointer pfd 4) :short 0) +pollin+
+          (cffi:mem-ref (cffi:inc-pointer pfd 6) :short 0) 0)
+    (loop
+      (let ((rc (cffi:foreign-funcall "poll"
+                                      :pointer pfd :unsigned-long 1 :int timeout-ms :int)))
+        (cond
+          ((> rc 0) (return (logtest +pollin+
+                                     (cffi:mem-ref (cffi:inc-pointer pfd 6) :short 0))))
+          ((= rc 0) (return nil))                        ; timeout
+          ((eql (get-errno) +eintr+))                    ; interrupted: retry
+          (t (return nil)))))))                          ; other error
+
 ;;; termios save/restore — we treat the struct as an opaque blob (no field
 ;;; access), so no platform-specific layout is needed.  +termios-size+ is a safe
 ;;; superset of the struct on Linux (60) and macOS (72); tcgetattr/tcsetattr only

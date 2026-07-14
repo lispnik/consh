@@ -152,28 +152,63 @@ several candidates remain (the driver lists them)."
 ;;; Terminal driver (raw mode via stty; interactive tty only)
 ;;; ---------------------------------------------------------------------------
 
+(defun %terminal-fd-of (stream)
+  "The underlying terminal fd for STREAM.  *standard-input* is typically a
+SYNONYM- or TWO-WAY-STREAM, not directly an fd-stream, so unwrap those first;
+fall back to fd 0 (stdin) when STREAM is an interactive terminal but no fd-stream
+is reachable.  NIL if no terminal fd can be found."
+  (labels ((unwrap (s)
+             (typecase s
+               (synonym-stream (unwrap (symbol-value (synonym-stream-symbol s))))
+               (two-way-stream (unwrap (two-way-stream-input-stream s)))
+               (t s))))
+    (or (ignore-errors (sb-sys:fd-stream-fd (unwrap stream)))
+        (and (ignore-errors (c-isatty 0)) 0))))
+
 (defun interactive-terminal-p (&optional (stream *standard-input*))
   "True if STREAM is an interactive terminal (so line editing is appropriate).
-NIL for a pipe or file — the REPL then uses plain READ-LINE.  Confirmed with
-isatty(3) when the fd is available."
+NIL for a pipe or file — the REPL then uses plain READ-LINE.  Resolves the fd
+through SYNONYM-/TWO-WAY-STREAM wrappers (which *standard-input* usually is) and
+confirms it with isatty(3) — the naive (sb-sys:fd-stream-fd stream) errors on
+those wrappers, which used to wrongly disable the editor in the dumped image."
   (and (interactive-stream-p stream)
-       (ignore-errors
-        (= 1 (cffi:foreign-funcall "isatty"
-                                   :int (sb-sys:fd-stream-fd stream) :int)))))
+       (let ((fd (%terminal-fd-of stream)))
+         (and fd (ignore-errors (c-isatty fd))))))
 
 (defun %stty (args)
   "Run stty ARGS on the controlling terminal, waiting for it."
   (ignore-errors (wait-process (launch "stty" args) :timeout 2)))
 
-(defun %read-csi (in)
+(defparameter *esc-follower-ms* 60
+  "How long to wait for a byte following ESC before deciding it was a lone ESC
+key (and for each subsequent byte of an escape sequence).  Escape sequences
+arrive as a burst, so this need only cover terminal/pty latency.")
+
+(defun %tty-read (in fd &optional (timeout-ms nil))
+  "Read one character from raw-mode terminal IN, resilient to signal-interrupted
+reads.  With FD (a real terminal): first LISTEN (a char SBCL already buffered
+from an earlier chunked read — poll on the OS fd would miss it); otherwise
+poll(2) the fd — indefinitely when TIMEOUT-MS is NIL, else for that many ms — so
+a SIGCHLD interrupting the blocking read cannot masquerade as EOF, and a
+TIMEOUT-MS lets a lone ESC time out instead of blocking.  Without FD (a string
+stream, in tests) it just reads.  Returns the char, or NIL on EOF/timeout."
+  (if (null fd)
+      (read-char in nil nil)
+      (if (or (listen in)                          ; already buffered by SBCL
+              (c-poll-readable fd (or timeout-ms -1)))   ; or the OS fd has data
+          (read-char in nil nil)
+          nil)))                                     ; timeout / EOF
+
+(defun %read-csi (in fd)
   "Read a CSI sequence body (everything after `ESC[`), consuming up to AND
 INCLUDING its final byte (0x40-0x7E), then map it to a key.  Consuming the whole
 sequence is what keeps an unhandled key's tail (params, `~`, paste payload) from
-leaking into the buffer as literal characters.  Returns :redraw for anything
-unrecognized (or a truncated sequence at EOF)."
+leaking into the buffer as literal characters.  Each byte is read with a short
+timeout so a truncated sequence (or a signal) can't wedge or corrupt parsing.
+Returns :redraw for anything unrecognized."
   (let ((params (make-string-output-stream)) (final nil))
-    (loop for c = (read-char in nil nil)
-          do (cond ((null c) (return))                       ; EOF mid-sequence
+    (loop for c = (%tty-read in fd *esc-follower-ms*)
+          do (cond ((null c) (return))                       ; timeout/EOF: truncated
                    ((<= 64 (char-code c) 126) (setf final c) (return)) ; final byte
                    (t (write-char c params))))               ; parameter/intermediate
     (let ((p (get-output-stream-string params)))
@@ -186,11 +221,13 @@ unrecognized (or a truncated sequence at EOF)."
                    (t :redraw)))
         (t :redraw)))))
 
-(defun %read-key (in)
-  "Read one logical key from raw-mode stream IN: a character, or a keyword for
-control/navigation keys.  Decodes the common CSI arrow/Home/End/Delete escapes;
-unhandled control characters and escape sequences are ignored (map to :redraw)."
-  (let ((c (read-char in nil nil)))
+(defun %read-key (in &optional fd)
+  "Read one logical key from raw-mode stream IN (FD is its terminal fd, or NIL for
+a string stream): a character, or a keyword for control/navigation keys.  Decodes
+the common CSI arrow/Home/End/Delete escapes; unhandled control characters and
+escape sequences are ignored (map to :redraw).  Reads are resilient to
+signal-interrupted syscalls when FD is given."
+  (let ((c (%tty-read in fd)))                   ; block (resiliently) for a key
     (cond
       ((null c) :eof)
       ((char= c #\Return) :enter)
@@ -205,9 +242,11 @@ unhandled control characters and escape sequences are ignored (map to :redraw)."
       ((char= c (code-char 21)) :kill-line)      ; ^U
       ((char= c #\Tab) :tab)
       ((char= c #\Escape)
-       (if (eql (read-char in nil nil) #\[)
-           (%read-csi in)
-           :redraw))                             ; ESC + other / EOF -> ignore
+       ;; wait briefly for a following byte: present => escape sequence; absent
+       ;; (a lone ESC key, or a signal) => ignore rather than block/corrupt
+       (if (eql (%tty-read in fd *esc-follower-ms*) #\[)
+           (%read-csi in fd)
+           :redraw))
       ;; any other control char (^W ^B ^F ^L ^R ^T ...) is not an insertable
       ;; character — ignore it rather than stuffing a control byte into the line
       ((< (char-code c) 32) :redraw)
@@ -223,7 +262,7 @@ unhandled control characters and escape sequences are ignored (map to :redraw)."
   "Read a line with editing/completion/history from raw-mode terminal IN.
 Returns the line string, or NIL on EOF."
   (let* ((ed (make-ledit))
-         (fd (ignore-errors (sb-sys:fd-stream-fd in)))
+         (fd (%terminal-fd-of in))
          ;; snapshot the exact terminal state so we can restore it with a single
          ;; tcsetattr syscall — robust against a preempted `stty sane` subprocess
          (saved (and fd (save-termios fd))))
@@ -232,7 +271,7 @@ Returns the line string, or NIL on EOF."
          (progn
            (%redraw ed prompt out)
            (loop
-             (let ((action (ledit-key ed (%read-key in))))
+             (let ((action (ledit-key ed (%read-key in fd))))
                (case action
                  (:submit (format out "~%") (return (ledit-text ed)))
                  (:cancel (format out "^C~%") (%ledit-set-line ed "")
