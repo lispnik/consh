@@ -25,6 +25,15 @@
   (:report (lambda (c s) (format s "cannot parse command line ~S"
                                  (shell-parse-error-line c)))))
 
+(define-condition shell-input-incomplete (shell-parse-error) ()
+  (:documentation
+   "A line is a syntactically incomplete PREFIX that more input could finish — an
+unterminated quote or an unbalanced Lisp form.  It is a subtype of
+SHELL-PARSE-ERROR, so batch use still reports it as a parse error; the
+interactive REPL instead reads a continuation line.")
+  (:report (lambda (c s) (format s "incomplete input: ~S"
+                                 (shell-parse-error-line c)))))
+
 (defun %read-quoted (stream quote)
   "Read a quoted run, QUOTE already peeked.  Returns the inner string.  Signals
 SHELL-PARSE-ERROR on an unterminated quote (EOF before the closing QUOTE) rather
@@ -32,7 +41,7 @@ than silently accepting the rest of the line."
   (read-char stream)                    ; consume opening quote
   (let ((out (make-string-output-stream)))
     (loop for c = (read-char stream nil nil) do
-      (cond ((null c) (error 'shell-parse-error
+      (cond ((null c) (error 'shell-input-incomplete
                              :line (format nil "unterminated ~C quote" quote)))
             ((char= c quote) (return (get-output-stream-string out)))
             (t (write-char c out))))))
@@ -822,17 +831,33 @@ running only the first form)."
           (unless (zerop (length rest))
             (error 'shell-parse-error :line trimmed))
           form))
+    ;; an unbalanced form runs out of input: incomplete, not a hard error
+    (end-of-file () (error 'shell-input-incomplete :line trimmed))
     (shell-parse-error (e) (error e))
     (serious-condition () (error 'shell-parse-error :line trimmed))))
+
+(defun %parse-line (trimmed)
+  "Parse a trimmed surface line into a Lisp form (NIL for blank), without
+evaluating.  Signals SHELL-INPUT-INCOMPLETE for an incomplete prefix."
+  (cond ((zerop (length trimmed)) nil)
+        ((%lisp-line-p trimmed) (%read-lisp-line trimmed))
+        (t (parse-shell-line trimmed))))
+
+(defun input-complete-p (text)
+  "NIL when TEXT is a syntactically incomplete prefix (unbalanced Lisp form or
+unterminated quote) that more input could finish; T otherwise (including a
+genuine parse error, which is 'complete enough' to report)."
+  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline) text)))
+    (handler-case (progn (%parse-line trimmed) t)
+      (shell-input-incomplete () nil)
+      (error () t))))
 
 (defun shell-eval (line &key (record t))
   "Evaluate a surface LINE: a Lisp form if it starts with `(`, otherwise a
 desugared command.  Records (form . result) in *history*.  Returns
 (values result form)."
   (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) line))
-         (form (cond ((zerop (length trimmed)) nil)
-                     ((%lisp-line-p trimmed) (%read-lisp-line trimmed))
-                     (t (parse-shell-line trimmed)))))
+         (form (%parse-line trimmed)))
     (if (null form)
         (values nil nil)
         (let ((result (eval form)))
@@ -975,6 +1000,10 @@ replace *prompt-function* to build richer prompts from the PROMPT-* helpers."
   "A function of no arguments returning the prompt string.")
 
 (defun prompt () (funcall *prompt-function*))
+
+(defvar *continuation-prompt* "...> "
+  "Prompt shown for continuation lines while completing a multi-line input (an
+open Lisp form or an unterminated quote).")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Presentation policy: how a REPL result is displayed

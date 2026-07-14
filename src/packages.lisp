@@ -156,7 +156,8 @@
    #:skip-object
    ;; ---- Phase 6: surface syntax ----
    #:tokenize #:parse-shell-line #:%shell-run #:shell-eval #:shell-repl
-   #:shell-parse-error
+   #:shell-parse-error #:shell-input-incomplete #:input-complete-p
+   #:*continuation-prompt*
    ;; builtins, $VAR expansion, globbing
    #:*builtins* #:define-builtin #:builtin #:builtin-p #:%builtin
    #:shell-exit #:shell-exit-code #:*previous-directory*

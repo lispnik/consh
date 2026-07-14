@@ -598,9 +598,11 @@ it so typing continues at point."
   (format nil "(~:[~;failed ~]reverse-i-search)`~A': "
           (ledit-sfailed ed) (ledit-squery ed)))
 
-(defun read-line-edited (prompt &key (in *standard-input*) (out *standard-output*))
+(defun read-line-edited (prompt &key (in *standard-input*) (out *standard-output*)
+                                     abort-on-cancel)
   "Read a line with editing/completion/history from raw-mode terminal IN.
-Returns the line string, or NIL on EOF."
+Returns the line string, NIL on EOF, or (when ABORT-ON-CANCEL) :cancelled if the
+line was aborted with ^C — used to bail out of a multi-line continuation."
   (let* ((ed (make-ledit))
          (fd (%terminal-fd-of in))
          ;; snapshot the exact terminal state so we can restore it with a single
@@ -617,8 +619,11 @@ Returns the line string, or NIL on EOF."
                (let ((action (ledit-key ed (%read-key in fd))))
                  (case action
                    (:submit (format out "~%") (return (ledit-text ed)))
-                   (:cancel (format out "^C~%") (%ledit-set-line ed "")
-                            (setf (ledit-hidx ed) nil))
+                   (:cancel (format out "^C~%")
+                            (if abort-on-cancel
+                                (return :cancelled)          ; bail out of continuation
+                                (progn (%ledit-set-line ed "")
+                                       (setf (ledit-hidx ed) nil))))
                    (:clear (format out "~C[2J~C[H" #\Escape #\Escape)  ; ^L: wipe + home
                            (repaint))
                    (:eof (format out "~%") (return nil))
@@ -634,10 +639,26 @@ Returns the line string, or NIL on EOF."
 ;;; The REPL
 ;;; ---------------------------------------------------------------------------
 
-(defun %read-repl-line (prompt interactive in out)
+(defun %read-repl-line (prompt interactive in out &key abort-on-cancel)
   (if interactive
-      (read-line-edited prompt :in in :out out)
+      (read-line-edited prompt :in in :out out :abort-on-cancel abort-on-cancel)
       (progn (write-string prompt out) (finish-output out) (read-line in nil nil))))
+
+(defun %read-complete-input (interactive in out)
+  "Read one complete command, spanning continuation lines while the accumulated
+input is an incomplete prefix (an open Lisp form or an unterminated quote).
+Returns the full text, NIL on EOF, or \"\" if a continuation is aborted with ^C."
+  (let ((first (%read-repl-line (prompt) interactive in out)))
+    (if (null first)
+        nil
+        (let ((buffer first))
+          (loop until (input-complete-p buffer) do
+            (let ((more (%read-repl-line *continuation-prompt* interactive in out
+                                         :abort-on-cancel t)))
+              (cond ((null more) (return))                    ; EOF: eval what we have
+                    ((eq more :cancelled) (return-from %read-complete-input ""))
+                    (t (setf buffer (concatenate 'string buffer (string #\Newline) more))))))
+          buffer))))
 
 (defun shell-repl (&key (in *standard-input*) (out *standard-output*))
   "Read-eval-print loop over surface syntax.  On an interactive tty it uses the
@@ -648,7 +669,7 @@ line (or, mid-command, tears the job down); Ctrl-D / EOF ends the loop."
         (*present-color* (interactive-terminal-p in)))  ; bold table headers on a tty
     (loop
       (dolist (event (take-job-events)) (format out "~&[~A]~%" event))
-      (let ((line (handler-case (%read-repl-line (prompt) interactive in out)
+      (let ((line (handler-case (%read-complete-input interactive in out)
                     (sb-sys:interactive-interrupt () (format out "~&^C~%") "")
                     ;; a non-interrupt error while reading (a stream error, a
                     ;; decode error) is reported and the loop continues, rather

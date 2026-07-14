@@ -325,6 +325,30 @@ name the shell's own vocabulary unqualified — pipe, pipeline-collect, external
     (let ((*current-directory* dir))
       (is (member "zzfile" (complete-line "cat zz") :test #'string=)))))
 
+;;; --- multi-line continuation ----------------------------------------------
+
+(test input-complete-p-detects-incomplete-prefixes
+  ;; complete inputs
+  (is-true  (input-complete-p "ls -l"))
+  (is-true  (input-complete-p "(+ 1 2)"))
+  (is-true  (input-complete-p "echo \"closed\""))
+  (is-true  (input-complete-p ""))
+  ;; incomplete: an open Lisp form or an unterminated quote wants more input
+  (is-false (input-complete-p "(+ 1 2"))
+  (is-false (input-complete-p "(list (foo"))
+  (is-false (input-complete-p "echo \"open"))
+  ;; a genuine parse error counts as complete (so it gets reported, not extended)
+  (is-true  (input-complete-p "echo )bad( )")))
+
+(test incomplete-input-is-a-parse-error-subtype
+  ;; batch/programmatic use still sees a shell-parse-error
+  (signals shell-parse-error (shell-eval "(+ 1 2"))
+  (signals shell-input-incomplete (shell-eval "echo \"open")))
+
+(test multi-line-lisp-form-evaluates-when-closed
+  ;; the accumulated buffer (joined with newlines) parses and runs as one form
+  (is (equal '(1 2 3) (shell-eval (format nil "(list 1~%2~%3)")))))
+
 (test complete-command-includes-aliases
   (let ((*aliases* (make-hash-table :test 'equal)))
     (define-alias "zzalias" "ls -l")
