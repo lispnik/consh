@@ -181,36 +181,55 @@ which case the caller should treat the `[` as a literal character."
         (values (if negate (not matched) matched) (1+ j) t)
         (values nil j nil))))                             ; unterminated set
 
+(defun %match-one (pattern px ch)
+  "Match the single (non-`*`) pattern element at PX against char CH.  Returns the
+pattern index after the element on a match, else NIL.  Handles `?`, `[set]` (and
+an unmatched `[` as a literal), and a literal character."
+  (let ((pc (char pattern px)))
+    (cond
+      ((char= pc #\?) (1+ px))
+      ((char= pc #\[)
+       (multiple-value-bind (ok next closed) (%match-set pattern px ch)
+         (cond ((not closed) (and (char= ch #\[) (1+ px)))   ; literal [
+               (ok next)
+               (t nil))))
+      ((char= pc ch) (1+ px))
+      (t nil))))
+
 (defun %glob-match-p (pattern name)
   "True if shell glob PATTERN (`*` any run, `?` one char, `[set]`) matches NAME.
-A leading dot in NAME is not matched by a leading `*`/`?` (Unix convention)."
+A leading dot in NAME is not matched by a leading `*`/`?` (Unix convention).
+Uses the linear two-pointer algorithm with a single backtrack point per `*`, so
+it cannot exhibit the exponential blow-up a naive recursive matcher does on
+patterns like `**********b`."
   (when (and (plusp (length name)) (char= (char name 0) #\.)
              (plusp (length pattern)) (not (char= (char pattern 0) #\.)))
     (return-from %glob-match-p nil))
-  (labels ((m (px sx)
-             (cond
-               ((= px (length pattern)) (= sx (length name)))
-               ((char= (char pattern px) #\*)
-                (or (m (1+ px) sx)
-                    (and (< sx (length name)) (m px (1+ sx)))))
-               ((= sx (length name)) nil)
-               ((char= (char pattern px) #\?) (m (1+ px) (1+ sx)))
-               ((char= (char pattern px) #\[)
-                (multiple-value-bind (ok next closed) (%match-set pattern px (char name sx))
-                  (if closed
-                      (and ok (m next (1+ sx)))
-                      ;; unmatched `[` — match it as a literal character
-                      (and (char= (char name sx) #\[) (m (1+ px) (1+ sx))))))
-               ((char= (char pattern px) (char name sx)) (m (1+ px) (1+ sx)))
-               (t nil))))
-    (m 0 0)))
+  (let ((plen (length pattern)) (nlen (length name))
+        (px 0) (sx 0) (star-px -1) (star-sx 0))
+    (loop
+      (cond
+        ((< sx nlen)
+         (let ((next (and (< px plen) (char/= (char pattern px) #\*)
+                          (%match-one pattern px (char name sx)))))
+           (cond
+             (next (setf px next sx (1+ sx)))                    ; element matched
+             ((and (< px plen) (char= (char pattern px) #\*))    ; record `*`, skip it
+              (setf star-px px star-sx sx px (1+ px)))
+             ((>= star-px 0)                                     ; backtrack: `*` eats one more
+              (setf px (1+ star-px) star-sx (1+ star-sx) sx star-sx))
+             (t (return nil)))))
+        (t                                                       ; name consumed
+         (loop while (and (< px plen) (char= (char pattern px) #\*)) do (incf px))
+         (return (= px plen)))))))
 
 (defun %glob-chars-p (string)
   (find-if (lambda (c) (member c '(#\* #\? #\[))) string))
 
 (defun %basename (pathname)
   (if (and (null (pathname-name pathname)) (pathname-directory pathname))
-      (car (last (pathname-directory pathname)))     ; a directory: its name, no /
+      (let ((last (car (last (pathname-directory pathname)))))
+        (if (stringp last) last ""))                 ; a directory: its name (root -> "")
       (file-namestring pathname)))
 
 (defun glob (pattern &key (directory *current-directory*))
@@ -512,13 +531,27 @@ the signal, defaulting to SIGTERM."
   "A line beginning with ( or ` is a full Lisp form, not a command."
   (and (plusp (length line)) (member (char line 0) '(#\( #\`))))
 
+(defun %read-lisp-line (trimmed)
+  "Read exactly one Lisp form from a `(`-line.  Signals a clean SHELL-PARSE-ERROR
+on an unbalanced form (else a raw END-OF-FILE leaks) OR on trailing text after
+the form (which would otherwise be silently dropped — e.g. `(+ 1 2) rm -rf /`
+running only the first form)."
+  (handler-case
+      (multiple-value-bind (form pos) (read-from-string trimmed)
+        (let ((rest (string-trim '(#\Space #\Tab #\Newline) (subseq trimmed pos))))
+          (unless (zerop (length rest))
+            (error 'shell-parse-error :line trimmed))
+          form))
+    (shell-parse-error (e) (error e))
+    (serious-condition () (error 'shell-parse-error :line trimmed))))
+
 (defun shell-eval (line &key (record t))
   "Evaluate a surface LINE: a Lisp form if it starts with `(`, otherwise a
 desugared command.  Records (form . result) in *history*.  Returns
 (values result form)."
   (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) line))
          (form (cond ((zerop (length trimmed)) nil)
-                     ((%lisp-line-p trimmed) (read-from-string trimmed))
+                     ((%lisp-line-p trimmed) (%read-lisp-line trimmed))
                      (t (parse-shell-line trimmed)))))
     (if (null form)
         (values nil nil)

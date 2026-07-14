@@ -340,6 +340,26 @@ raw internal condition."
       (serious-condition (e)
         (fail "line ~S leaked a raw ~A" line (type-of e))))))
 
+(test glob-many-stars-is-linear-not-exponential
+  "A pattern of many `*` against a long non-matching name must return promptly
+(linear matcher).  If the exponential recursion regressed, this test would hang
+the whole suite."
+  (is-false (consh::%glob-match-p (concatenate 'string (make-string 25 :initial-element #\*) "b")
+                                  (make-string 60 :initial-element #\a)))
+  (is-true (consh::%glob-match-p "foo*bar*baz*qux" "fooAbarBbazCqux"))
+  (is-false (consh::%glob-match-p "foo*bar*baz*qux" "fooAbarBbazCquux")))
+
+(test basename-of-root-is-a-string-not-a-keyword
+  "%basename must never return the :ABSOLUTE marker (which would crash the glob
+matcher's (length name))."
+  (is (stringp (consh::%basename #p"/"))))
+
+(test lisp-line-unbalanced-or-trailing-is-a-clean-error
+  (signals shell-parse-error (shell-eval "(+ 1 2" :record nil))       ; unbalanced
+  (signals shell-parse-error (shell-eval "(+ 1 2) rm -rf /" :record nil)) ; trailing
+  ;; a well-formed single form still evaluates
+  (is (= 3 (shell-eval "(+ 1 2)" :record nil))))
+
 ;;; ===========================================================================
 ;;; Builtins
 ;;; ===========================================================================
