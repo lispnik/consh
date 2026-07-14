@@ -93,6 +93,9 @@ sbcl                   # run inside the cloned repo
 Run the tests with `make test` (or
 `sbcl --non-interactive --eval '(asdf:test-system :consh)'`).
 
+There's a full user manual in [`man/consh.1`](man/consh.1) — read it with
+`make man` (or `man ./man/consh.1`).
+
 **Configuration** is just Lisp. At startup consh loads
 `~/.config/consh/consh.lisp` (or `$XDG_CONFIG_HOME/consh/consh.lisp`) in the
 `consh` package — define aliases, set the prompt, register wrappers, add

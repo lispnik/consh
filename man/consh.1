@@ -1,0 +1,609 @@
+.\" Manual page for consh.
+.\" View with:  man ./man/consh.1     Render text:  man ./man/consh.1 | cat
+.TH CONSH 1 "July 14, 2026" "consh" "Consh Manual"
+.SH NAME
+consh \- a Common Lisp Unix shell where pipelines carry objects, not bytes
+.SH SYNOPSIS
+.B consh
+.SH DESCRIPTION
+.B consh
+is an interactive Unix shell implemented as a Common Lisp (SBCL) image.
+It is deliberately
+.B not
+POSIX\-compatible.  Its defining idea is that a pipeline carries a stream of
+CLOS objects, not a stream of bytes: external commands are wrapped by
+generic\-function parsers that enrich their output into typed objects, failures
+are conditions with restarts, and jobs are objects combining subprocesses and
+Lisp threads.
+.PP
+The command line and Lisp are one language.  A bare line is a command; a line
+beginning with
+.B (
+or a backquote is a full Lisp form evaluated in the
+.B consh
+package, so the shell's whole vocabulary (\c
+.BR pipe ,
+.BR file\-size ,
+.BR table ,
+\&...) is available unqualified at the prompt.  Anything you can type
+interactively you can also write as Lisp, because the surface syntax simply
+desugars to the underlying pipeline and job forms.
+.SH INVOCATION
+.B consh
+takes no command\-line arguments; run it to start a read\-eval\-print loop.
+On startup it, in order:
+.IP \(bu 3
+adopts the current working directory of the process that launched it
+(see
+.B "NON\-POSIX NOTES"
+on the no\-\c
+.BR chdir (2)
+design);
+.IP \(bu 3
+loads the user init file (see
+.BR CONFIGURATION );
+.IP \(bu 3
+restores command history from disk (see
+.BR FILES );
+.IP \(bu 3
+takes ownership of the controlling terminal for job control, if standard input
+is a terminal.
+.PP
+When standard input is an interactive terminal, consh uses its full line editor
+(editing keys, completion, history, autosuggestions, syntax highlighting).  When
+standard input is a pipe or file, it reads plain lines with no editing \(em so a
+script can be fed on standard input.  To run a file of shell lines from within a
+session, use the
+.B source
+builtin.
+.SH COMMAND LANGUAGE
+.SS Commands and Lisp
+Every non\-empty line that does not begin with
+.B (
+or backquote is a command line.  A line that does begin with one of those is
+read as exactly one Lisp form and evaluated; trailing text after the form, or an
+unbalanced form, is an error (an unbalanced form instead continues on the next
+line \(em see
+.BR "Multi\-line input" ).
+.SS Escaping to Lisp
+Inside a command line,
+.BI , form
+and
+.BI $( form )
+evaluate the Lisp
+.I form
+and splice its value in as an argument.  For example
+.B "echo $(string\-upcase \(dqhi\(dq)"
+prints
+.BR HI ,
+and
+.B "grep ,*pattern* file"
+passes the value of the Lisp variable
+.B *pattern*
+as grep's pattern.
+.SS Pipelines and background
+.B |
+builds a pipeline.  Adjacent external commands are grouped so that they share a
+single kernel
+.BR pipe (2)
+\(em bytes go kernel\-to\-kernel, never through Lisp, at the same cost as any other
+shell.  Where a Lisp stage sits between externals, objects cross the boundary
+instead of text.  A trailing
+.B &
+runs the pipeline in the background as a job (see
+.BR JOBS ).
+.SS Redirection
+Redirections are applied in command\-line order (this matters for descriptor
+duplication):
+.TP
+.B < file
+Standard input from
+.IR file .
+.TP
+.B > file
+Standard output to
+.IR file ,
+truncating it.
+.TP
+.B >> file
+Standard output appended to
+.IR file .
+.TP
+.B 2> file ", " 2>> file
+Standard error to (or appended to)
+.IR file .
+.TP
+.B 2>&1
+Redirect standard error to wherever standard output currently goes.
+.TP
+.B >&2 ", " 1>&2
+Redirect standard output to wherever standard error currently goes.
+.TP
+.B &> file ", " &>> file ", " >& file
+Send both standard output and standard error to
+.IR file .
+.PP
+Because order is significant,
+.B "cmd > f 2>&1"
+sends both streams to
+.IR f ,
+whereas
+.B "cmd 2>&1 > f"
+sends only standard output to
+.IR f
+(standard error keeps the terminal).  Builtins ignore redirections.
+.SS Expansion
+Words are expanded in this order: alias, tilde, variable, glob.
+.TP
+.B $NAME\fR, \fB${NAME}
+The value of environment variable
+.IR NAME ,
+or empty if unset.
+.TP
+.B ~\fR, \fB~/path\fR, \fB~user\fR, \fB~user/path
+Home directory of the current user, or of
+.IR user .
+An unknown user is left literal.
+.TP
+.B * ? [set] [!set]
+Filename globbing.  Character sets and negated sets are supported, as are
+directory components: \fB*/\fR, \fBsrc/*/x\fR, and a trailing \fB/\fR that
+restricts matches to directories.  A pattern that matches nothing is left
+literal (as in most shells).  Relative patterns yield relative results.
+.SS Quoting
+Single (\fB\(aq\fR) and double (\fB\(dq\fR) quotes group a run of characters into
+one word and are stripped.  An unterminated quote is treated as incomplete input
+and continues on the next line.
+.SS Aliases
+.B "alias name=expansion"
+defines an alias; a command whose first word is an alias has the expansion
+spliced in.  Aliases are expanded once (no recursion), at the front of the
+command only.
+.SS Comments
+In a file read by
+.BR source ,
+a line whose first non\-blank character is
+.B #
+is ignored, as are blank lines.
+.SH OBJECTS, NOT BYTES
+A per\-command parser protocol turns each wrapped command's output into objects
+at the boundary.  For example
+.B ls
+prints only names, so its wrapper parses them and
+.BR stat (2)s
+each in\-process to return
+.B file\-info
+objects carrying size, mtime, and owner.  Wrapped commands include:
+.BR cat ,
+.BR date ,
+.BR df ,
+.BR du ,
+.BR find ,
+.BR git ,
+.BR grep ,
+.BR ls ,
+.BR lsblk ,
+.BR ps ,
+.BR sed ,
+.BR stat ,
+and
+.BR wc .
+An unwrapped command falls back to lines of text.  Some wrappers translate
+GNU/BSD dialects (for instance
+.B stat
+picks \fB\-c\fR or \fB\-f\fR, and
+.B "date \-d @N"
+is rewritten to
+.B "date \-r N"
+on BSD).
+.PP
+Pipelines can also contain in\-image Lisp stages that need no subprocess, written
+in the
+.B pipe
+DSL:
+.BR :map ,
+.BR :filter ,
+.BR :mapcat ,
+.BR :emit ,
+.BR :grep ,
+.BR :cat ,
+.BR :sort ,
+and
+.BR :uniq .
+.SS Presentation
+By default, when a command's result is a uniform stream of one wrapped type it
+is rendered as an aligned table (with a bold header on a terminal); a mixed or
+unwrapped stream prints one element per line, and a scalar prints readably.  The
+.B table
+function forces or customizes tabulation, e.g.
+.BR "(table objs :columns \(aq((\(dqSZ\(dq . file\-size)))" .
+.SH BUILTIN COMMANDS
+.TP
+.BI "cd " "[dir]"
+Change directory.  With no argument, go to
+.BR $HOME ;
+.B cd \-
+returns to the previous directory.  Handles
+.B ~
+and consults
+.B $CDPATH
+for a bare relative name not present in the current directory.  Directory
+changes are per\-shell state; the process working directory never changes.
+.TP
+.B pwd
+Print the current directory.
+.TP
+.BI "pushd " "[dir]"
+Change to
+.IR dir ,
+pushing the current directory onto the directory stack; with no argument, swap
+the top two.  Prints the stack.
+.TP
+.B popd
+Change to the directory popped off the stack.
+.TP
+.B dirs
+List the directory stack (current directory first).
+.TP
+.BI "export " "NAME=VALUE ..."
+Set environment variables (inherited by spawned commands).
+.TP
+.BI "unset " "NAME ..."
+Remove environment variables.
+.TP
+.BI "alias " "[NAME=EXPANSION ...]"
+Define aliases, or with no argument list the current ones.
+.TP
+.BI "unalias " "NAME ..."
+Remove aliases.
+.TP
+.B jobs
+List background and stopped jobs (as job objects).
+.TP
+.BI "fg " "[%job]"
+Resume a job in the foreground, handing it the terminal.
+.TP
+.BI "bg " "[%job]"
+Resume a stopped job in the background.
+.TP
+.BI "kill " "[\-SIG] %job|pid"
+Send a signal (name or number, default
+.BR TERM )
+to a job or process.
+.TP
+.BI "wait " "[%job]"
+Wait for a job (or, with no argument, all jobs) to finish.
+.TP
+.B history
+List past command forms.
+.TP
+.BI "source " file
+Run each line of
+.I file
+as shell input (comments and blank lines skipped).  Also spelled
+.BR . .
+.TP
+.BI "type " "NAME ..."
+Report how each name resolves: shell builtin, alias, wrapped command, a
+.B $PATH
+executable, or not found.
+.TP
+.BI "which " "NAME ..."
+Print the path of each external
+.IR NAME .
+.TP
+.BI "help " "[NAME ...]"
+List the builtins, or describe the named ones.
+.TP
+.BI "exit " "[N]"
+Leave the shell with status
+.I N
+(default 0).
+.PP
+.B Auto\-cd:
+a bare line naming an existing directory (that is not also a builtin, alias, or
+command) changes into it, as if
+.BR "cd dir" .
+Controlled by the
+.B *auto\-cd*
+variable.
+.SH LINE EDITING
+On a terminal, consh provides an Emacs\-style line editor.
+.SS Key bindings
+.TP
+.BR "Ctrl\-A" ", " "Ctrl\-E"
+Move to start / end of line.
+.TP
+.BR "Left" ", " "Right" ", " "Home" ", " "End"
+Move by character or to line ends.
+.TP
+.BR "Alt\-B" ", " "Alt\-F"
+Move backward / forward by word.
+.TP
+.BR "Ctrl\-K" ", " "Ctrl\-U"
+Kill to end of line / the whole line.
+.TP
+.BR "Ctrl\-W" ", " "Alt\-D"
+Kill the previous / next word.
+.TP
+.B Ctrl\-Y
+Yank (paste) the most recent kill.
+.TP
+.B Ctrl\-T
+Transpose the two characters around the cursor.
+.TP
+.B Ctrl\-L
+Clear the screen.
+.TP
+.BR "Up" ", " "Down"
+Browse history; a stashed line is restored past the newest entry.
+.TP
+.B Ctrl\-R
+Incremental reverse history search; press
+.B Ctrl\-R
+again for older matches,
+.B Enter
+to accept and run,
+.B Ctrl\-C
+to restore the line.
+.TP
+.B Tab
+Complete the current token; press
+.B Tab
+again to cycle through the candidates.
+.TP
+.BR "Ctrl\-C" ", " "Ctrl\-D"
+Abort the current line / end of input (on an empty line, exit).
+.SS Completion
+.B Tab
+completes commands (builtins, aliases, wrappers, and
+.B $PATH
+executables), Lisp symbols after a
+.B ,
+or
+.BR ( ,
+environment names after
+.BR $ ,
+and
+.BR ~/ \-relative
+and other file paths.  Repeated
+.B Tab
+cycles the candidate list.
+.SS Autosuggestions
+As you type, the tail of the most recent matching history entry is shown dim
+after the cursor;
+.B Right
+or
+.B End
+accepts it.  Controlled by
+.BR *autosuggest* .
+.SS Syntax highlighting
+The command line is coloured as you type: the command word green when it
+resolves and red when it does not, quoted strings yellow, and operators and
+.B $VAR
+references cyan.  Controlled by
+.BR *highlight* .
+.SS Multi\-line input
+An unbalanced Lisp form or an unterminated quote is treated as incomplete: consh
+prompts for continuation lines (with
+.BR *continuation\-prompt* ,
+default
+.BR "...> " )
+and accumulates them until the input parses.
+.B Ctrl\-C
+on a continuation aborts the whole input.
+.SH THE PROMPT
+The prompt is produced by the zero\-argument function in
+.BR *prompt\-function* .
+Ready\-made building blocks (all plain functions) compose one from Lisp:
+.BR prompt\-cwd ,
+.BR prompt\-cwd\-base ,
+.BR prompt\-user ,
+.BR prompt\-host ,
+.BR prompt\-git\-branch
+(reads
+.BR .git/HEAD ,
+no subprocess),
+.BR prompt\-time ,
+.BR prompt\-jobs ,
+and
+.B prompt\-exit\-status
+(empty on success, else the last foreground command's exit code).
+.B colorize
+wraps text in an ANSI colour; the editor measures the prompt's visible width, so
+colours never shift the cursor.
+.SH CONFIGURATION
+consh is configured in Lisp.  At startup it loads
+.RB $ XDG_CONFIG_HOME /consh/consh.lisp
+(or
+.IR ~/.config/consh/consh.lisp )
+in the
+.B consh
+package.  A broken init file is reported and skipped, never blocking startup.
+Useful variables to set there:
+.TP
+.B *prompt\-function*
+The prompt (see
+.BR "THE PROMPT" ).
+.TP
+.B *continuation\-prompt*
+Prompt shown for multi\-line continuation lines.
+.TP
+.B *auto\-cd*
+Enable bare\-directory auto\-cd (default on).
+.TP
+.B *autosuggest*
+Enable history autosuggestions (default on).
+.TP
+.B *highlight*
+Enable syntax highlighting (default on).
+.TP
+.B *present\-color*
+Bold table headers (set from terminal interactivity).
+.TP
+.B *history\-file* ", " *history\-max*
+Where history persists, and how many entries are kept (default 1000).
+.TP
+.B *load\-init\-file*
+When NIL, skip loading the init file.
+.PP
+You can also define aliases, register command wrappers, and define builtins
+there.  Example
+.IR ~/.config/consh/consh.lisp :
+.PP
+.RS 4
+.EX
+(in\-package :consh)
+
+(define\-alias "ll" "ls \-l")
+
+(setf *prompt\-function*
+      (lambda ()
+        (let ((branch (prompt\-git\-branch))
+              (status (prompt\-exit\-status)))
+          (format nil "~A~@[ ~A~]~@[~A~]> "
+                  (colorize (prompt\-cwd) :bright\-blue t)
+                  (and branch (colorize branch :green))
+                  (unless (string= status "")
+                    (colorize (format nil " [~A]" status) :red t))))))
+.EE
+.RE
+.SH JOBS
+Background jobs (started with
+.BR & ,
+or stopped with
+.B Ctrl\-Z
+in the foreground) are first\-class objects tracked in a registry;
+.BR jobs ,
+.BR fg ,
+.BR bg ,
+.BR kill ,
+and
+.B wait
+operate on them.  Job control performs a genuine
+.BR tcsetpgrp (3)
+handoff of the terminal.  A background job's output is buffered in a bounded
+ring so an unbounded producer keeps only its most recent objects.
+.PP
+An unhandled condition in a worker thread
+.I parks
+the job rather than crashing it, with the stack \(em and therefore its restarts
+\(em intact.  You can inspect the parked job at the prompt and use
+.B debug\-job
+to resume it end\-to\-end by choosing a restart, run in the worker's own context.
+.SH ENVIRONMENT
+.TP
+.B PATH
+Searched for external commands and for command completion.
+.TP
+.B CDPATH
+Colon\-separated directories consulted by
+.B cd
+for a bare relative target not found in the current directory.
+.TP
+.B HOME
+Used for
+.B ~
+expansion and as the default target of
+.BR cd .
+.TP
+.B XDG_CONFIG_HOME
+Base of the configuration directory; defaults to
+.IR ~/.config .
+.SH FILES
+.TP
+.I ~/.config/consh/consh.lisp
+User init file, loaded at startup (honours
+.BR $XDG_CONFIG_HOME ).
+.TP
+.I ~/.config/consh/history
+Persistent command history.
+.SH EXIT STATUS
+The
+.B exit
+builtin sets the shell's exit status.  Within a session, the exit status of the
+most recent foreground command is available as
+.B prompt\-exit\-status
+(and the variable
+.BR *last\-status* ),
+so a prompt can display it.
+.SH EXAMPLES
+Filter file objects by a Lisp predicate on a typed slot, then render a table:
+.PP
+.RS 4
+.EX
+consh> (table (pipeline\-collect
+               (pipe (ls) (:filter (lambda (f) (> (file\-size f) 4096))))))
+.EE
+.RE
+.PP
+A familiar external pipeline whose
+.B grep
+tail is enriched into objects (line number and text):
+.PP
+.RS 4
+.EX
+consh> seq 1 5 | grep 3
+FILE  LINE  TEXT
+\-\-\-\-  \-\-\-\-  \-\-\-\-
+         3  3
+.EE
+.RE
+.PP
+Fold the sizes that
+.B find
+returns into a byte total, in Lisp, over objects:
+.PP
+.RS 4
+.EX
+consh> (reduce #\(aq+ (pipeline\-collect (pipe (find "."))) :key #\(aqfile\-size)
+.EE
+.RE
+.PP
+Redirections, globs, and variable expansion look familiar:
+.PP
+.RS 4
+.EX
+consh> sort < in.txt > out.txt
+consh> echo $HOME/notes
+consh> cat *.txt
+.EE
+.RE
+.SH NON\-POSIX NOTES
+consh is not a drop\-in POSIX shell, by design:
+.IP \(bu 3
+Pipelines carry objects, not bytes; a command's default output is objects (often
+a table), not a fixed text format.
+.IP \(bu 3
+There is no
+.BR chdir (2):
+.B cd
+updates per\-shell state and spawned children are given their directory at spawn
+time, so the process working directory is never mutated.
+.IP \(bu 3
+Command sequencing and conditionals are Lisp, not shell operators: there is no
+.BR ; ,
+.BR && ,
+or
+.BR || .
+Use Lisp forms such as
+.BR progn ,
+.BR and ,
+.BR or ,
+and
+.B when
+(a
+.B (
+line is full Lisp).
+.IP \(bu 3
+Control flow, functions, and variables are Lisp, not a shell scripting dialect.
+.IP \(bu 3
+Builtins ignore redirections.
+.SH SEE ALSO
+.BR sbcl (1)
+.PP
+The project README documents the design and internals in depth.
+.SH AUTHOR
+Matthew Kennedy <burnsidemk@gmail.com>.
+.SH LICENSE
+MIT.
