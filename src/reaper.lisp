@@ -197,14 +197,18 @@ number reaped.  Never blocks (WNOHANG)."
   *reaper-thread*)
 
 (defun stop-reaper ()
-  "Ask the reaper to stop after its next drain and join it."
-  (let ((thread *reaper-thread*))
-    (when (and thread (sb-thread:thread-alive-p thread))
-      (setf *reaper-stop* t)
-      (sb-thread:signal-semaphore *reaper-sem*)          ; wake it to notice the stop
-      (sb-thread:join-thread thread :default nil))
-    (setf *reaper-thread* nil)
-    t))
+  "Ask the reaper to stop after its next drain and join it.  Holds *reaper-lock*
+so it cannot clobber a *reaper-thread* that a concurrent start-reaper just
+installed (which would orphan/duplicate reaper threads).  Safe to join under the
+lock: the reaper loop never takes *reaper-lock*."
+  (sb-thread:with-mutex (*reaper-lock*)
+    (let ((thread *reaper-thread*))
+      (when (and thread (sb-thread:thread-alive-p thread))
+        (setf *reaper-stop* t)
+        (sb-thread:signal-semaphore *reaper-sem*)        ; wake it to notice the stop
+        (sb-thread:join-thread thread :default nil))
+      (setf *reaper-thread* nil)
+      t)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Launching and waiting at the shell level

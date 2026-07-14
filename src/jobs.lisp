@@ -107,7 +107,9 @@
 
 (defun job-events (job)
   "The job's event lines, oldest first."
-  (reverse (%job-events (find-job job))))
+  (let ((j (find-job job)))
+    ;; read under the lock — %post-event pushes %job-events under job-lock
+    (reverse (sb-thread:with-mutex ((job-lock j)) (copy-list (%job-events j))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Job events (surfaced at the prompt)
@@ -178,9 +180,14 @@ worker's own dynamic context."
     (when (and (null (job-parked job)) (eq (job-state job) :parked))
       (setf (job-state job) :running))))
 
+(defun %first-parked (job)
+  "The job's most-recently parked worker, read under the job lock (job-parked is
+mutated by %park-worker/%unpark under that lock)."
+  (sb-thread:with-mutex ((job-lock job)) (first (job-parked job))))
+
 (defun job-restarts (job)
   "The restart names offered by the job's (first) parked worker."
-  (let ((pw (first (job-parked (find-job job)))))
+  (let ((pw (%first-parked (find-job job))))
     (and pw (parked-worker-restarts pw))))
 
 (defun debug-job (job &key (restart 'use-raw-lines) args)
@@ -188,7 +195,7 @@ worker's own dynamic context."
 context, resuming the frozen line.  With no live restart named RESTART the
 worker declines and the condition propagates."
   (let* ((j (find-job job))
-         (pw (first (job-parked j))))
+         (pw (%first-parked j)))
     (unless pw (error "job ~A is not parked" (and j (job-id j))))
     (%give-directive pw (list* :invoke-restart restart args))
     (%post-event j (format nil "job ~D resumed via ~A" (job-id j) restart))
@@ -196,7 +203,7 @@ worker declines and the condition propagates."
 
 (defun resume-job (job)
   "Tell a parked job's worker to decline (let the condition propagate)."
-  (let ((pw (first (job-parked (find-job job)))))
+  (let ((pw (%first-parked (find-job job))))
     (when pw (%give-directive pw (list :decline)))
     job))
 
@@ -365,13 +372,19 @@ terminal."
 
 (defun continue-job (job)
   "Resume a stopped job: SIGCONT the process group and release the parked Lisp
-workers."
+workers.  The state check and transition are one atomic step under the job lock
+so a racing stop/complete cannot make continue see a stale :running and skip the
+resume (leaving the job stuck :stopped with a paused stop-flag)."
   (let ((j (find-job job)))
-    (when (eq (job-state j) :stopped)
+    (when (sb-thread:with-mutex ((job-lock j))
+            (when (eq (job-state j) :stopped)
+              (setf (job-state j) :running)
+              t))
+      ;; side effects outside the job lock (no lock held while touching the
+      ;; stop-flag lock — avoids any lock-order inversion)
       (let ((pgid (%job-pgid j)))
         (when pgid (ignore-errors (c-killpg pgid +sigcont+))))
       (stop-flag-resume (job-stop-flag j))
-      (sb-thread:with-mutex ((job-lock j)) (setf (job-state j) :running))
       (%post-event j (format nil "job ~D continued" (job-id j))))
     j))
 
@@ -417,6 +430,12 @@ terminal with the shell."
 (defun kill-job (job)
   "Terminate JOB and reclaim its processes and threads."
   (let ((j (find-job job)))
+    ;; Wake any Lisp workers parked on the stop-flag (a stopped/C-z'd job) BEFORE
+    ;; teardown — otherwise they sleep on the stop-flag cvar, which teardown's
+    ;; channel close does not signal, so the joins would block until timeout and
+    ;; leak the threads.  Once resumed they proceed to their next channel op,
+    ;; find it closed, and exit via channel-closed.
+    (stop-flag-resume (job-stop-flag j))
     (when (job-result j) (%teardown (pipeline-result-state (job-result j))))
     (sb-thread:with-mutex ((job-lock j))
       (setf (job-state j) :done (job-complete-p j) t)

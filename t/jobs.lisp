@@ -358,3 +358,19 @@ pgid is tolerated."
   (let ((*terminal-fd* nil) (*shell-pgid* nil))
     (finishes (give-terminal-to-pgid 999999))
     (finishes (give-terminal-to-pgid nil))))
+
+(test stopped-job-with-parked-worker-kills-promptly
+  "A job with a Lisp worker parked on the stop-flag (stopped, never continued)
+must still be killable promptly: kill-job resumes the stop-flag so the worker
+unparks, meets the closed channel, and exits — instead of teardown's join
+blocking until timeout and leaking the thread."
+  (let ((j (run-job (make-pipeline (list (external "yes") (map-stage #'identity)))
+                    :background t :buffer-capacity 8)))
+    (sleep 0.15)
+    (stop-job j)                         ; SIGTSTP + stop-flag-pause -> parks worker
+    (sleep 0.15)
+    (let ((start (get-internal-real-time)))
+      (kill-job j)
+      (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 3.0))
+      (is (eq :done (job-state j)))
+      (is-true (job-complete-p j)))))
