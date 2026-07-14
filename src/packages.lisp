@@ -175,4 +175,6 @@
    #:*line-history* #:record-line #:make-ledit #:ledit #:ledit-text #:ledit-point
    #:ledit-key #:ledit-complete #:read-line-edited #:interactive-terminal-p
    #:*kill-ring*
+   #:*history-file* #:*history-max* #:*history-persist* #:history-file-path
+   #:load-history-file
    #:shell-repl #:main))

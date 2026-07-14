@@ -246,6 +246,56 @@
 (test interactive-terminal-p-false-for-non-tty
   (is (null (interactive-terminal-p (make-string-input-stream "hi")))))
 
+(defmacro with-temp-history ((path-var) &body body)
+  "Run BODY with a throwaway history file bound as *history-file* and persistence
+enabled; delete the file afterward."
+  `(let* ((,path-var (merge-pathnames (format nil "consh-hist-~D.txt" (sb-posix:getpid))
+                                      #P"/tmp/"))
+          (consh:*history-file* ,path-var)
+          (consh:*history-persist* t)
+          (consh:*line-history* (make-array 0 :adjustable t :fill-pointer 0)))
+     (unwind-protect (progn ,@body)
+       (ignore-errors (delete-file ,path-var)))))
+
+(test history-persists-across-sessions
+  (with-temp-history (path)
+    ;; "session one": record a few lines; they append to the file
+    (record-line "ls")
+    (record-line "grep foo")
+    (record-line "grep foo")                       ; dup of last -> not re-recorded
+    (record-line "cd src")
+    (is (probe-file path))
+    ;; "session two": a fresh in-memory history reloads from disk
+    (let ((consh:*line-history* (make-array 0 :adjustable t :fill-pointer 0)))
+      (load-history-file)
+      (is (equalp #("ls" "grep foo" "cd src") consh:*line-history*)))))
+
+(test history-not-written-when-persistence-off
+  (let* ((path (merge-pathnames (format nil "consh-nopersist-~D.txt" (sb-posix:getpid))
+                                #P"/tmp/"))
+         (consh:*history-file* path)
+         (consh:*history-persist* nil)             ; the default: memory only
+         (consh:*line-history* (make-array 0 :adjustable t :fill-pointer 0)))
+    (unwind-protect
+         (progn (record-line "secret command")
+                (is (equalp #("secret command") consh:*line-history*))  ; in memory
+                (is (null (probe-file path))))                          ; but not on disk
+      (ignore-errors (delete-file path)))))
+
+(test history-file-compacts-past-the-cap
+  (with-temp-history (path)
+    (let ((consh:*history-max* 3))
+      ;; write 5 distinct lines to the file directly
+      (with-open-file (s path :direction :output :if-exists :supersede
+                              :if-does-not-exist :create)
+        (dolist (l '("one" "two" "three" "four" "five")) (write-line l s)))
+      (load-history-file)
+      ;; only the last 3 survive, in memory and (compacted) on disk
+      (is (equalp #("three" "four" "five") consh:*line-history*))
+      (let ((on-disk (with-open-file (s path)
+                       (loop for l = (read-line s nil nil) while l collect l))))
+        (is (equal '("three" "four" "five") on-disk))))))
+
 ;;; --- driver hardening ------------------------------------------------------
 
 (test unknown-key-is-a-harmless-redraw-not-a-crash

@@ -15,15 +15,77 @@
 (defvar *line-history* (make-array 0 :adjustable t :fill-pointer 0)
   "Vector of the raw command lines entered, oldest first.")
 
-(defun record-line (line)
-  "Add LINE to *line-history* unless blank or a duplicate of the last entry."
+(defvar *history-file* :default
+  "Where the line history persists across sessions.  :DEFAULT means
+<config>/consh/history (alongside consh.lisp); a pathname overrides it; NIL puts
+history in memory only.")
+
+(defparameter *history-max* 1000
+  "Cap on retained history entries, in memory and on disk.")
+
+(defvar *history-persist* nil
+  "When true, RECORD-LINE also appends to the history file.  The dumped entry
+point turns this on after loading; it stays off in-process (and in tests) so
+programmatic use never writes to the user's history file.")
+
+(defun history-file-path ()
+  "Pathname of the persistent history file, or NIL when persistence is disabled."
+  (case *history-file*
+    ((nil) nil)
+    (:default (merge-pathnames "consh/history" (%config-home)))
+    (t *history-file*)))
+
+(defun %history-add (line)
+  "Add LINE to *line-history* unless blank or a duplicate of the last entry.
+Returns the trimmed line when it was added, else NIL."
   (let ((trimmed (string-trim '(#\Space #\Tab) line)))
     (when (and (plusp (length trimmed))
                (or (zerop (fill-pointer *line-history*))
                    (not (string= trimmed (aref *line-history*
                                                (1- (fill-pointer *line-history*)))))))
-      (vector-push-extend trimmed *line-history*)))
+      (vector-push-extend trimmed *line-history*)
+      trimmed)))
+
+(defun %append-history-line (line)
+  "Best-effort append of LINE to the history file (errors are swallowed)."
+  (let ((path (history-file-path)))
+    (when path
+      (ignore-errors
+        (ensure-directories-exist path)
+        (with-open-file (s path :direction :output :if-exists :append
+                                :if-does-not-exist :create :external-format :utf-8)
+          (write-line line s))))))
+
+(defun record-line (line)
+  "Add LINE to *line-history* (blank/duplicate-filtered); when persistence is on,
+also append the new entry to the history file."
+  (let ((added (%history-add line)))
+    (when (and added *history-persist*)
+      (%append-history-line added)))
   line)
+
+(defun %rewrite-history-file (path lines)
+  "Overwrite PATH with LINES (best-effort) — used to compact an overgrown file."
+  (ignore-errors
+    (ensure-directories-exist path)
+    (with-open-file (s path :direction :output :if-exists :supersede
+                            :if-does-not-exist :create :external-format :utf-8)
+      (dolist (l lines) (write-line l s)))))
+
+(defun load-history-file (&key (path (history-file-path)))
+  "Populate *line-history* from PATH (oldest first), keeping the last *history-max*
+entries; compact the file if it had grown past the cap.  Best-effort — a missing
+or unreadable file is ignored.  Returns the resulting entry count."
+  (let ((file (and path (probe-file path))))
+    (when file
+      (ignore-errors
+        (let* ((lines (with-open-file (s file :external-format :utf-8)
+                        (loop for l = (read-line s nil nil) while l collect l)))
+               (tail  (last lines *history-max*)))
+          (dolist (l tail) (%history-add l))
+          (when (> (length lines) *history-max*)
+            (%rewrite-history-file path tail)))))
+    (fill-pointer *line-history*)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The editor model
@@ -540,6 +602,9 @@ line (or, mid-command, tears the job down); Ctrl-D / EOF ends the loop."
   ;; Load ~/.config/consh/consh.lisp (aliases, prompt, wrappers) — a broken init
   ;; file reports and is swallowed, never blocking startup.
   (when *load-init-file* (load-init-file))
+  ;; Restore command history from disk, and persist new lines going forward.
+  (load-history-file)
+  (setf *history-persist* t)
   ;; Take the controlling terminal (if stdin is a tty) so fg/bg can hand it to
   ;; jobs — a no-op under a pipe or without a tty.
   (enable-terminal-job-control 0)
