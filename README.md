@@ -133,7 +133,7 @@ colours never shift the cursor.
 
 <p align="center">
   <img src="assets/prompt-demo.gif" width="760"
-       alt="A consh session with a customized prompt: a bold-blue current directory and a green git branch read from .git/HEAD. `ls` returns file objects and `(table …)` renders them as an aligned grid; a Lisp `:filter` predicate keeps only the file over 1000 bytes. After `false` the prompt gains a red [1] marker that clears on the next success. `cd src` tracks the directory, `cd /tmp` makes the branch segment vanish outside the repo, and `cd -` brings it back.">
+       alt="A consh session under a customized prompt with a bold-blue directory and a green git branch read from .git/HEAD. The command line is syntax-highlighted as it is typed (valid commands green, operators cyan). A bare `ls` auto-renders its file objects as an aligned table; a Lisp `:filter` predicate keeps only the file over 1000 bytes; `seq 1 5 | grep 3` yields a grep-match table. After `false` the prompt gains a red [1] marker that clears on the next success. Typing `ls R` shows a dim autosuggestion from history that Right accepts. `cd src` tracks the directory, `cd /tmp` makes the branch segment vanish outside the repo, and `cd -` brings it back.">
 </p>
 
 ### Interactive editing

@@ -21,16 +21,19 @@ COLS, ROWS = 92, 24
 
 random.seed(7)  # deterministic typing jitter
 
-# The story. Each item is (command, pause_after_seconds).
+# The story. Each item is (text, pause_after_seconds[, mode]).  mode defaults to
+# "type" (type TEXT then Enter); "suggest" types TEXT as a prefix, waits for the
+# autosuggestion ghost, then presses Right to accept it before Enter.
 SCRIPT = [
-    ("ls", 1.4),
-    ("(table (pipeline-collect (pipe (ls))))", 1.8),
-    ("(pipeline-collect (pipe (ls) (:filter (lambda (f) (> (file-size f) 1000)))))", 1.9),
-    ("false", 1.3),
-    ("ls README.md", 1.6),
-    ("cd src", 1.3),
-    ("cd /tmp", 1.5),
-    ("cd -", 1.9),
+    ("ls", 1.7),                                       # a bare command auto-tables its objects
+    ("(pipeline-collect (pipe (ls) (:filter (lambda (f) (> (file-size f) 1000)))))", 2.0),
+    ("seq 1 5 | grep 3", 1.7),                         # a pipe carries objects -> grep-match table
+    ("false", 1.3),                                    # a failure lights the red [1] marker
+    ("ls README.md", 1.7),                             # success clears it (and seeds history)
+    ("ls R", 1.6, "suggest"),                          # autosuggestion: ghost "EADME.md", Right accepts
+    ("cd src", 1.3),                                   # the prompt's cwd tracks
+    ("cd /tmp", 1.6),                                  # leaving the repo drops the git branch
+    ("cd -", 2.0),                                     # coming back restores it
 ]
 
 master, slave = pty.openpty()
@@ -69,10 +72,16 @@ def drain(window):
                            data.decode("utf-8", "replace")])
 
 drain(1.4)  # banner + first prompt
-for cmd, pause in SCRIPT:
-    for ch in cmd:
+for entry in SCRIPT:
+    text, pause = entry[0], entry[1]
+    mode = entry[2] if len(entry) > 2 else "type"
+    for ch in text:
         os.write(master, ch.encode())
-        drain(0.055 + random.uniform(0, 0.05))  # keystroke echo + human jitter
+        drain(0.06 + random.uniform(0, 0.05))    # keystroke echo + human jitter
+    if mode == "suggest":
+        drain(0.9)                               # let the dim autosuggestion appear
+        os.write(master, b"\x1b[C")              # Right arrow accepts the suggestion
+        drain(0.6)
     time.sleep(0.35)
     os.write(master, b"\r")
     drain(pause)
