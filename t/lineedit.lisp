@@ -459,6 +459,27 @@ escapes) and any other keyword — a repaint, not a CASE-FAILURE."
   (with-input-from-string (s string)
     (loop for k = (consh::%read-key s) until (eq k :eof) collect k)))
 
+(test bracketed-paste-inserts-as-one-edit
+  (let ((ed (make-ledit)))
+    (type-string ed "x ")
+    (ledit-key ed (cons :paste "foo bar"))         ; a paste key inserts the whole payload
+    (is (string= "x foo bar" (ledit-text ed)))
+    (is (= 9 (ledit-point ed)))
+    (ledit-key ed :undo)                            ; and it's a single undo unit
+    (is (string= "x " (ledit-text ed)))))
+
+(test bracketed-paste-decodes-and-flattens-newlines
+  "ESC[200~ … ESC[201~ decodes to one (:paste . text) key with newlines flattened
+to spaces, so a multi-line paste never runs a command per line."
+  (flet ((esc (s) (concatenate 'string (string #\Escape) s)))
+    ;; ESC[200~ a <newline> b ESC[201~  ->  (:paste . "a b")
+    (is (equal (list (cons :paste "a b"))
+               (%keys-from (concatenate 'string (esc "[200~") "a" (string #\Newline) "b"
+                                        (esc "[201~")))))
+    ;; text after the paste terminator is read normally
+    (is (equal (list (cons :paste "hi") #\z)
+               (%keys-from (concatenate 'string (esc "[200~") "hi" (esc "[201~") "z"))))))
+
 (test csi-sequence-is-fully-consumed-no-tail-leak
   "A full CSI (e.g. ctrl-right ESC[1;5C) maps to one key and its parameter tail
 does NOT leak as literal inserts."

@@ -176,6 +176,13 @@ line (readline's delete-char-or-list-or-eof)."
                                        (string ch) (subseq (ledit-text ed) p))
           (ledit-point ed) (1+ p))))
 
+(defun ledit-insert-string (ed s)
+  "Insert string S at point (used for bracketed paste)."
+  (let ((p (ledit-point ed)))
+    (setf (ledit-text ed) (concatenate 'string (subseq (ledit-text ed) 0 p)
+                                       s (subseq (ledit-text ed) p))
+          (ledit-point ed) (+ p (length s)))))
+
 (defun ledit-backspace (ed)
   (let ((p (ledit-point ed)))
     (when (plusp p)
@@ -483,27 +490,35 @@ via (:show . LIST); pressing Tab again then cycles through them."
 
 ;;; --- Key dispatch (the driver feeds keys here) ----------------------------
 
+(defun %paste-key-p (key) (and (consp key) (eq (car key) :paste)))
+
 (defun %ledit-search-key (ed key)
   "Key dispatch while in ^R reverse-search mode."
-  (if (characterp key)
-      (progn (ledit-search-type ed key) :redraw)
-      (case key
+  (cond
+    ((characterp key) (ledit-search-type ed key) :redraw)
+    ((%paste-key-p key) (ledit-search-accept ed) (%ledit-normal-key ed key))
+    (t
+     (case key
         (:reverse-search (ledit-reverse-search ed) :redraw)   ; older match
         (:backspace      (ledit-search-backspace ed) :redraw)
         (:cancel         (ledit-search-cancel ed) :redraw)    ; ^C: restore the line, stay
         (:enter          (ledit-search-accept ed) :submit)    ; accept + run
         (:eof            (ledit-search-cancel ed) :redraw)    ; ^D: leave search
         ;; any movement/edit key accepts the match, then applies normally
-        (t (ledit-search-accept ed) (%ledit-normal-key ed key)))))
+        (t (ledit-search-accept ed) (%ledit-normal-key ed key))))))
 
 (defun %ledit-normal-key (ed key)
   "Key dispatch during ordinary editing (not in search mode)."
-  (if (characterp key)
-      (progn (%note-insert ed) (ledit-insert ed key) :redraw)
-      ;; CASE (not ECASE): an unknown key — including the :redraw that %read-key
-      ;; returns for unrecognized escape sequences — is a harmless repaint, never
-      ;; a CASE-FAILURE that would crash the editor.
-      (case key
+  (cond
+    ((characterp key) (%note-insert ed) (ledit-insert ed key) :redraw)
+    ;; a bracketed paste: insert the whole payload as one edit (newlines already
+    ;; flattened to spaces), so pasted text can't run a command per line
+    ((%paste-key-p key) (%note-edit ed) (ledit-insert-string ed (cdr key)) :redraw)
+    (t
+     ;; CASE (not ECASE): an unknown key — including the :redraw that %read-key
+     ;; returns for unrecognized escape sequences — is a harmless repaint, never
+     ;; a CASE-FAILURE that would crash the editor.
+     (case key
         (:backspace   (%note-edit ed) (ledit-backspace ed) :redraw)
         (:delete      (%note-edit ed) (ledit-delete ed) :redraw)
         (:left        (%break-run ed) (ledit-left ed) :redraw)
@@ -537,7 +552,7 @@ via (:show . LIST); pressing Tab again then cycles through them."
         (:enter       :submit)
         (:cancel      :cancel)
         (:eof         (%ledit-eof ed))      ; delete char mid-line, or EOF on empty
-        (t            :redraw))))
+        (t            :redraw)))))
 
 (defun ledit-key (ed key)
   "Apply KEY to ED, returning an action: :redraw, :submit, :cancel, :eof, :clear,
@@ -617,8 +632,30 @@ Returns :redraw for anything unrecognized."
         (#\~ (cond ((member p '("1" "7") :test #'string=) :home)
                    ((member p '("4" "8") :test #'string=) :end)
                    ((string= p "3") :delete)
+                   ((string= p "200") :paste-start)   ; bracketed paste begin
+                   ((string= p "201") :paste-end)     ; bracketed paste end
                    (t :redraw)))
         (t :redraw)))))
+
+(defparameter *paste-read-ms* 200
+  "How long to wait for the next byte of a bracketed-paste payload before giving
+up — pastes arrive as a burst, so this only needs to cover terminal latency.")
+
+(defun %read-paste (in fd)
+  "Read a bracketed-paste payload up to its ESC[201~ terminator and return
+(:PASTE . TEXT).  Newlines are flattened to spaces so the paste stays one line
+and, crucially, does not submit a command per line."
+  (let ((out (make-string-output-stream)))
+    (loop for c = (%tty-read in fd *paste-read-ms*) do
+      (cond
+        ((null c) (return))                              ; timeout/EOF: stop
+        ((char= c #\Escape)                              ; maybe the ESC[201~ end
+         (when (and (eql (%tty-read in fd *esc-follower-ms*) #\[)
+                    (eq (%read-csi in fd) :paste-end))
+           (return)))
+        ((or (char= c #\Newline) (char= c #\Return)) (write-char #\Space out))
+        (t (write-char c out))))
+    (cons :paste (get-output-stream-string out))))
 
 (defun %read-key (in &optional fd)
   "Read one logical key from raw-mode stream IN (FD is its terminal fd, or NIL for
@@ -657,7 +694,9 @@ signal-interrupted syscalls when FD is given."
        (let ((next (%tty-read in fd *esc-follower-ms*)))
          (cond
            ((null next) :redraw)
-           ((char= next #\[) (%read-csi in fd))
+           ((char= next #\[)
+            (let ((k (%read-csi in fd)))
+              (if (eq k :paste-start) (%read-paste in fd) k)))  ; slurp a bracketed paste
            ((char= next #\b) :back-word)          ; M-b
            ((char= next #\f) :forward-word)       ; M-f
            ((char= next #\d) :kill-word-forward)  ; M-d
@@ -791,6 +830,8 @@ line was aborted with ^C — used to bail out of a multi-line continuation."
              ;; while searching, the prompt becomes the incremental-search prompt
              (%redraw ed (if (ledit-searching ed) (%search-prompt ed) prompt) out cols)))
       (%stty '("-echo" "-icanon" "min" "1" "time" "0"))
+      (format out "~C[?2004h" #\Escape)      ; enable bracketed paste
+      (finish-output out)
       (unwind-protect
            (progn
              (repaint)
@@ -821,6 +862,8 @@ line was aborted with ^C — used to bail out of a multi-line continuation."
                               (ledit-render-oldpos ed) 0
                               (ledit-render-crow ed) 0))
                       (repaint))))))
+        (format out "~C[?2004l" #\Escape)    ; disable bracketed paste
+        (finish-output out)
         ;; restore the captured attributes atomically; fall back to `stty sane`
         ;; only if we could not snapshot them
         (unless (and fd saved (restore-termios fd saved))
