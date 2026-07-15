@@ -404,7 +404,7 @@ and accumulates them until the input parses.
 on a continuation aborts the whole input.
 .SS Display
 A line longer than the terminal wraps across rows with the cursor tracked
-correctly, wide (East-Asian) and combining characters are measured at their true
+correctly and reflows when the terminal is resized, wide (East-Asian) and combining characters are measured at their true
 display width, and a bracketed paste is inserted as one block (its newlines
 flattened to spaces) rather than run a command per line.
 .SH THE PROMPT
