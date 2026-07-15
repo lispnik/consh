@@ -560,6 +560,55 @@ consh> (reduce #\(aq+ (pipeline\-collect (pipe (find "."))) :key #\(aqfile\-size
 .EE
 .RE
 .PP
+A longer mixed pipeline: the external
+.B find
+feeds a chain of Lisp stages (filter, map, sort, map) that reshape its file
+objects, all in one pass:
+.PP
+.RS 4
+.EX
+consh> (pipeline\-collect
+        (pipe (find "src" "\-name" "*.lisp")
+              (:filter (lambda (f) (> (file\-size f) 8000)))
+              (:map    (lambda (f) (cons (file\-name f) (file\-size f))))
+              (:sort :key #\(aqcdr :test #\(aq>)
+              (:map    (lambda (p) (format nil "~6D B   ~A" (cdr p) (car p))))))
+ 39769 B   src/surface.lisp
+ 35124 B   src/lineedit.lisp
+ 28016 B   src/ffi.lisp
+ ...
+.EE
+.RE
+.PP
+External, native, and Lisp stages together: numbers from
+.BR sh ,
+parsed in Lisp, then sorted and de\-duplicated in\-image (no subprocess for the
+sort/uniq):
+.PP
+.RS 4
+.EX
+consh> (pipeline\-collect
+        (pipe (:external "sh" "\-c" "seq 1 3; seq 1 3")
+              (:map #\(aqparse\-integer) (:sort :test #\(aq<) (:uniq)))
+(1 2 3)
+.EE
+.RE
+.PP
+An imperative
+.B :emit
+stage keeps state across objects; a
+.B :generate
+clause is a pure\-Lisp source that needs no subprocess at all:
+.PP
+.RS 4
+.EX
+consh> (pipeline\-collect
+        (pipe (:generate (emit) (dotimes (i 10) (funcall emit (1+ i))))
+              (:filter #\(aqevenp) (:map (lambda (n) (* n n)))))
+(4 16 36 64 100)
+.EE
+.RE
+.PP
 Redirections, globs, and variable expansion look familiar:
 .PP
 .RS 4
