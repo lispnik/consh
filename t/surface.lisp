@@ -396,6 +396,73 @@ name the shell's own vocabulary unqualified — pipe, pipeline-collect, external
     (sb-posix:unsetenv "CONSH_TV")))
 
 ;;; ===========================================================================
+;;; Script positional parameters + option parsing + script evaluation
+;;; ===========================================================================
+
+(test positional-parameter-expansion
+  (let ((*script-name* "myscript") (*script-args* '("a" "b" "c")) (*last-status* 0))
+    (is (string= "myscript" (%expand-vars "$0")))
+    (is (string= "a"  (%expand-vars "$1")))
+    (is (string= "c"  (%expand-vars "$3")))
+    (is (string= ""   (%expand-vars "$4")))               ; out of range -> empty
+    (is (string= "a"  (%expand-vars "${1}")))              ; braced form
+    (is (string= "3"  (%expand-vars "$#")))                ; arg count
+    (is (string= "a b c" (%expand-vars "$@")))
+    (is (string= "a b c" (%expand-vars "$*")))
+    (is (string= "0"  (%expand-vars "$?")))                ; last status
+    (is (string= "3"  (%expand-vars "${#}")))
+    (is (string= "arg=a!" (%expand-vars "arg=$1!")))       ; mixed with literals
+    ;; a bare $<digits> is the whole number
+    (is (string= "" (let ((*script-args* '("x"))) (%expand-vars "$10"))))))
+
+(test positional-parameters-default-outside-a-script
+  (let ((*script-name* nil) (*script-args* nil) (*last-status* 7))
+    (is (string= "consh" (%expand-vars "$0")))
+    (is (string= "0" (%expand-vars "$#")))
+    (is (string= "" (%expand-vars "$@")))
+    (is (string= "" (%expand-vars "$1")))
+    (is (string= "7" (%expand-vars "$?")))))
+
+(test parse-args-options-and-positionals
+  (multiple-value-bind (opts pos)
+      (parse-args '("-v" "--out" "o.mp4" "in1" "in2")
+                  '((:verbose "-v" "--verbose" boolean) (:out "-o" "--out" string)))
+    (is (eq t (getf opts :verbose)))
+    (is (string= "o.mp4" (getf opts :out)))
+    (is (equal '("in1" "in2") pos)))
+  ;; --opt=val and -o=val forms
+  (multiple-value-bind (opts pos)
+      (parse-args '("--out=x" "-n=5" "p")
+                  '((:out "--out" string) (:num "-n" string)))
+    (is (string= "x" (getf opts :out)))
+    (is (string= "5" (getf opts :num)))
+    (is (equal '("p") pos)))
+  ;; `--` ends option parsing
+  (multiple-value-bind (opts pos)
+      (parse-args '("-v" "--" "-notanoption") '((:verbose "-v" boolean)))
+    (is (eq t (getf opts :verbose)))
+    (is (equal '("-notanoption") pos)))
+  ;; errors: unknown option, missing value
+  (signals shell-parse-error (parse-args '("-x") '((:v "-v" boolean))))
+  (signals shell-parse-error (parse-args '("-o") '((:o "-o" string)))))
+
+(test eval-script-lines-skips-shebang-and-accumulates-multiline
+  (let* ((nl (string #\Newline))
+         (script (concatenate 'string
+                              "#!/x/consh" nl "# a comment" nl nl
+                              "(format t \"sum=~A\" (+ 1" nl "   2" nl "   3))" nl))
+         (in (make-string-input-stream script))
+         (out (with-output-to-string (*standard-output*)
+                (%eval-script-lines (lambda () (read-line in nil nil))))))
+    (is (string= "sum=6" out))))                          ; shebang/comment/blank skipped, form joined
+
+(test eval-script-lines-propagates-exit
+  (let ((in (make-string-input-stream (format nil "exit 5~%echo after~%"))))
+    (handler-case (progn (%eval-script-lines (lambda () (read-line in nil nil)))
+                         (fail "exit did not propagate"))
+      (shell-exit (c) (is (= 5 (shell-exit-code c)))))))
+
+;;; ===========================================================================
 ;;; Globbing
 ;;; ===========================================================================
 

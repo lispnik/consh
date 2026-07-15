@@ -113,6 +113,15 @@ jobs:
             echo "$out" | grep -q 'LINE  TEXT' || return 1
             echo "$out" | grep -q '2  2' || return 1
             echo "$out" | grep -q "^42$" || return 1
+            # scripting: a shebang script with positional params and an exit code
+            printf '#!/x/consh\n# comment\necho "$0 $# $@"\nexit 4\n' > /tmp/s.consh
+            sout=$(./consh /tmp/s.consh alpha beta); src=$?
+            echo "$sout (rc=$src)"
+            echo "$sout" | grep -q 's.consh' || return 1
+            echo "$sout" | grep -q '2 alpha beta' || return 1
+            [ "$src" = 4 ] || return 1
+            # -c command string with a positional argument
+            echo "$(./consh -c 'echo "one=$1"' name first)" | grep -q 'one=first' || return 1
           }
           for attempt in 1 2 3; do
             if smoke; then exit 0; fi

@@ -5,6 +5,11 @@
 consh \- a Common Lisp Unix shell where pipelines carry objects, not bytes
 .SH SYNOPSIS
 .B consh
+.RB [ \-c
+.IR COMMAND " [" NAME " [" ARG ...]] |
+.IR SCRIPT " [" ARG ...] |
+.B \-
+.RB "| " \-h ]
 .SH DESCRIPTION
 .B consh
 is an interactive Unix shell implemented as a Common Lisp (SBCL) image.
@@ -29,31 +34,53 @@ package, so the shell's whole vocabulary (\c
 interactively you can also write as Lisp, because the surface syntax simply
 desugars to the underlying pipeline and job forms.
 .SH INVOCATION
+With no operands,
 .B consh
-takes no command\-line arguments; run it to start a read\-eval\-print loop.
-On startup it, in order:
-.IP \(bu 3
-adopts the current working directory of the process that launched it
-(see
+starts an interactive read\-eval\-print loop.  Given a
+.I SCRIPT
+file (or
+.B \-c
+.IR COMMAND ,
+or
+.B \-
+to read from standard input) it instead runs that as a script and exits with its
+status \(em so a file beginning with
+.B #!/usr/bin/env consh
+runs as
+.BR "./script.consh arg ..." .
+The options are:
+.TP
+.BI \-c " COMMAND " [ NAME " [" ARG ...]]
+Run
+.IR COMMAND ,
+with
+.I NAME
+as
+.B $0
+and the following operands as positional parameters.
+.TP
+.B \-
+Read the script from standard input.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.PP
+On an interactive start it, in order: adopts the launching process's working
+directory (see
 .B "NON\-POSIX NOTES"
 on the no\-\c
 .BR chdir (2)
-design);
-.IP \(bu 3
-loads the user init file (see
-.BR CONFIGURATION );
-.IP \(bu 3
-restores command history from disk (see
-.BR FILES );
-.IP \(bu 3
-takes ownership of the controlling terminal for job control, if standard input
-is a terminal.
+design), loads the user init file (see
+.BR CONFIGURATION ),
+restores command history (see
+.BR FILES ),
+and takes the controlling terminal for job control if standard input is a
+terminal.  Script mode is lean: no banner, init file, history, or line editor.
 .PP
 When standard input is an interactive terminal, consh uses its full line editor
 (editing keys, completion, history, autosuggestions, syntax highlighting).  When
-standard input is a pipe or file, it reads plain lines with no editing \(em so a
-script can be fed on standard input.  To run a file of shell lines from within a
-session, use the
+standard input is a pipe or file, it reads plain lines with no editing.  To run a
+file of shell lines from within a session, use the
 .B source
 builtin.
 .SH COMMAND LANGUAGE
@@ -165,6 +192,71 @@ In a file read by
 a line whose first non\-blank character is
 .B #
 is ignored, as are blank lines.
+.SH SCRIPTING
+A consh script is a file of command and Lisp lines, made executable with a
+shebang and run with arguments:
+.PP
+.RS 4
+.EX
+#!/usr/bin/env consh
+echo "$0 processing $# files: $@"
+(dolist (f (script\-args)) (remove\-audio f))
+.EE
+.RE
+.PP
+Inside a script the positional parameters are available in command lines:
+.B $0
+is the script name,
+.BR $1 .. $N
+the arguments (a bare
+.B $\fIN\fR
+is the whole number; use
+.BI ${ N }
+when adjacent to more digits),
+.B $#
+their count,
+.BR $@ / $*
+all of them, and
+.B $?
+the last command's exit status.  The Lisp equivalents are
+.BR *script\-args* ,
+.BR "(script\-arg " N ),
+and
+.BR (script\-args) .
+.PP
+.B parse\-args
+parses options.  Given the argument list and a spec of
+.RI ( KEY " " FLAG ... " " TYPE )
+entries \(em where
+.I TYPE
+is
+.B boolean
+or
+.B string
+\(em it returns
+.RB "(values " OPTIONS\-PLIST " " POSITIONALS ),
+handling
+.BR \-\-opt=val ,
+.BR "\-\-opt val" ,
+.BR "\-o val" ,
+and a
+.B \-\-
+end\-of\-options marker:
+.PP
+.RS 4
+.EX
+(multiple\-value\-bind (opts files)
+    (parse\-args (script\-args)
+                \(aq((:verbose "\-v" "\-\-verbose" boolean)
+                  (:out "\-o" "\-\-output" string)))
+  (when (getf opts :verbose) (echo "verbose"))
+  (dolist (f files) ...))
+.EE
+.RE
+.PP
+Script mode does not load the init file or history; use
+.B source
+to pull those in explicitly if needed.
 .SH OBJECTS, NOT BYTES
 A per\-command parser protocol turns each wrapped command's output into objects
 at the boundary.  For example

@@ -395,6 +395,21 @@ On an interactive terminal the REPL uses a line editor with **Tab completion**,
 back to plain `read-line` for pipes and scripts. **Ctrl-C** aborts the current
 line, or tears down a running foreground job; **Ctrl-D** exits.
 
+### Scripting
+
+A file with a shebang is an executable consh script that takes arguments:
+
+```sh
+#!/usr/bin/env consh
+echo "$0 processing $# files: $@"       # $0 name, $1.. args, $# count, $@ all, $? status
+(dolist (f (script-args)) (remove-audio f))
+```
+
+Positional parameters (`$0 $1 … $# $@ $* $?`, or the Lisp `(script-args)`) work in
+command lines; `parse-args` handles options (`-v`, `--out=x`, `--`). Also
+`consh -c "COMMAND" [name args]` and `consh -` (script from stdin). Script mode is
+lean — no banner, init file, history, or line editor.
+
 
 ## How it's built
 

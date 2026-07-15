@@ -159,6 +159,9 @@
    #:tokenize #:parse-shell-line #:%shell-run #:shell-eval #:shell-repl
    #:shell-parse-error #:shell-input-incomplete #:input-complete-p
    #:*continuation-prompt*
+   ;; scripting: positional parameters + option parsing
+   #:*script-args* #:*script-name* #:script-arg #:script-args #:parse-args
+   #:%eval-script-lines
    ;; builtins, $VAR expansion, globbing
    #:*builtins* #:define-builtin #:builtin #:builtin-p #:%builtin
    #:shell-exit #:shell-exit-code #:*previous-directory*

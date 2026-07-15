@@ -984,12 +984,9 @@ line (or, mid-command, tears the job down); Ctrl-D / EOF ends the loop."
             (sb-sys:interactive-interrupt () (setf *last-status* 130) (format out "~&^C~%"))
             (error (e) (setf *last-status* 1) (format out "~&Error: ~A~%" e))))))))
 
-(defun main ()
-  "Entry point for a dumped consh executable: greet, run the REPL, exit cleanly."
-  ;; A saved image baked in *current-directory* at build time; adopt the real
-  ;; working directory the executable was launched from.
-  (ignore-errors
-   (setf *current-directory* (truename (pathname (format nil "~A/" (sb-posix:getcwd))))))
+(defun %run-interactive ()
+  "The interactive REPL session: banner, init file, history, job control.
+Returns the exit code (so `exit N` at the prompt propagates)."
   (format t "consh — a Common Lisp Unix shell (objects, not bytes). Ctrl-D to exit.~%")
   (finish-output)
   ;; Load ~/.config/consh/consh.lisp (aliases, prompt, wrappers) — a broken init
@@ -1004,9 +1001,77 @@ line (or, mid-command, tears the job down); Ctrl-D / EOF ends the loop."
   ;; Read/eval Lisp lines in the CONSH package so the shell's own vocabulary
   ;; (pipe, pipeline-collect, file-size, ...) is available unqualified at the
   ;; prompt — an object shell is only usable if its objects are in reach.
-  (unwind-protect
-       (handler-case (let ((*package* (find-package '#:consh))) (shell-repl))
-         (sb-sys:interactive-interrupt () (terpri)))
-    (disable-terminal-job-control))
-  (finish-output)
-  (sb-ext:exit :code 0))
+  (prog1
+      (unwind-protect
+           (handler-case (let ((*package* (find-package '#:consh))) (or (shell-repl) 0))
+             (sb-sys:interactive-interrupt () (terpri) 0))
+        (disable-terminal-job-control))
+    (finish-output)))
+
+(defun %with-script (name args thunk)
+  "Run THUNK as a script named NAME with ARGS as positional parameters, in the
+CONSH package.  Returns the exit code: a SHELL-EXIT's code, else the final
+*last-status* (0 on success)."
+  (let ((*script-name* name) (*script-args* args) (*last-status* 0)
+        (*package* (find-package '#:consh)))
+    (handler-case (progn (funcall thunk) (or *last-status* 0))
+      (shell-exit (c) (shell-exit-code c)))))
+
+(defun %string-line-reader (string)
+  "A NEXT-LINE thunk yielding successive newline-separated lines of STRING."
+  (let ((in (make-string-input-stream string)))
+    (lambda () (read-line in nil nil))))
+
+(defun %run-command-string (cmd args)
+  "consh -c CMD [name arg...]: run CMD with $0=name (or \"consh\") and $1.. from
+the remaining args."
+  (%with-script (or (first args) "consh") (rest args)
+                (lambda () (%eval-script-lines (%string-line-reader (or cmd ""))))))
+
+(defun %run-script-stream (stream name args)
+  "Run a script read from STREAM (e.g. stdin), with NAME as $0 and ARGS as $1.."
+  (%with-script name args
+                (lambda () (%eval-script-lines (lambda () (read-line stream nil nil))))))
+
+(defun %run-script-file (path args)
+  "Run the consh script at PATH with ARGS as positional parameters."
+  (let ((file (ignore-errors (probe-file (merge-pathnames path *current-directory*)))))
+    (if (null file)
+        (progn (format *error-output* "consh: ~A: no such file~%" path) 127)
+        (%with-script (namestring file) args
+                      (lambda ()
+                        (with-open-file (s file)
+                          (%eval-script-lines (lambda () (read-line s nil nil)))))))))
+
+(defun %print-usage (&optional (out *standard-output*))
+  (format out "~
+Usage: consh                     start an interactive shell
+       consh SCRIPT [ARG...]      run a consh script with positional args
+       consh -c COMMAND [NAME ARG...]  run COMMAND
+       consh -                    run a script read from standard input
+       consh -h | --help          show this help
+
+In a script, $0 is the script name, $1.. the arguments, $# their count, $@/$*
+all of them, and $? the last exit status; (script-args) and (parse-args ...) are
+the Lisp equivalents.~%"))
+
+(defun main ()
+  "Entry point for a dumped consh executable.  With no arguments it starts the
+interactive REPL; otherwise it runs a script file, a -c command string, or a
+script from stdin (-), then exits with that script's status."
+  ;; A saved image baked in *current-directory* at build time; adopt the real
+  ;; working directory the executable was launched from.
+  (ignore-errors
+   (setf *current-directory* (truename (pathname (format nil "~A/" (sb-posix:getcwd))))))
+  (let ((args (rest sb-ext:*posix-argv*)))            ; drop argv[0]
+    (sb-ext:exit
+     :code
+     (handler-case
+         (cond
+           ((null args) (%run-interactive))
+           ((member (first args) '("-h" "--help") :test #'string=) (%print-usage) 0)
+           ((string= (first args) "-c") (%run-command-string (second args) (cddr args)))
+           ((string= (first args) "-") (%run-script-stream *standard-input* "-" (rest args)))
+           (t (%run-script-file (first args) (rest args))))
+       (shell-exit (c) (shell-exit-code c))
+       (serious-condition (e) (format *error-output* "~&consh: ~A~%" e) 1)))))

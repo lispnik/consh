@@ -247,11 +247,12 @@ current directory (which is always the stack's implicit top).")
       (unless file
         (error 'shell-parse-error :line
                (format nil "source: no such file: ~A" (or (first args) ""))))
-      (with-open-file (s file)
-        (loop for line = (read-line s nil nil) while line
-              for trimmed = (string-trim '(#\Space #\Tab) line)
-              unless (or (zerop (length trimmed)) (char= (char trimmed 0) #\#))
-                do (shell-eval line)))
+      ;; %eval-script-lines skips shebang/comment/blank lines and handles
+      ;; multi-line forms; args after the file become $1.. within the script
+      (let ((*script-args* (rest args))
+            (*script-name* (namestring file)))
+        (with-open-file (s file)
+          (%eval-script-lines (lambda () (read-line s nil nil)))))
       (values))))
 
 (define-builtin "." (builtin "source"))

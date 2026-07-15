@@ -159,8 +159,33 @@ END-OF-FILE / READER-ERROR leaking out of the tokenizer."
         stage-tokens)))
 
 ;;; ---------------------------------------------------------------------------
-;;; $VAR / ${VAR} environment expansion
+;;; $VAR / ${VAR} expansion, script positional parameters ($0 $1 $@ $# $* $?)
 ;;; ---------------------------------------------------------------------------
+
+(defvar *script-args* nil
+  "Positional parameters of the running script: a list of argument strings, so
+$1 is (first *script-args*).  NIL outside a script.")
+
+(defvar *script-name* nil
+  "Name of the running script ($0), or NIL outside a script (then $0 is \"consh\").")
+
+(defun %positional-arg (k)
+  "The K-th positional parameter as a string: $0 is the script name, $1.. are
+*script-args* (1-based); out of range is the empty string."
+  (cond ((zerop k) (or *script-name* "consh"))
+        ((<= k (length *script-args*)) (nth (1- k) *script-args*))
+        (t "")))
+
+(defun %special-var (ch)
+  "The value of a special parameter: #=arg count, @/*=all args joined, ?=status."
+  (case ch
+    (#\# (princ-to-string (length *script-args*)))
+    ((#\@ #\*) (join-with-space *script-args*))
+    (#\? (princ-to-string *last-status*))
+    (t "")))
+
+(defun script-arg (n) (%positional-arg n))
+(defun script-args () *script-args*)
 
 (defun %var-name-char-p (c &optional firstp)
   (and c (or (alpha-char-p c) (char= c #\_) (and (not firstp) (digit-char-p c)))))
@@ -178,21 +203,87 @@ after `$`), return (values name index-after-ref), else (values NIL I)."
          (values (subseq string i end) end)))
       (t (values nil i)))))
 
+(defun %resolve-var (name)
+  "Resolve a ${...}-style reference NAME: all-digits is a positional parameter, a
+lone # @ * ? is a special parameter, else an environment variable."
+  (cond ((zerop (length name)) "")
+        ((every #'digit-char-p name) (%positional-arg (parse-integer name)))
+        ((and (= 1 (length name)) (member (char name 0) '(#\# #\@ #\* #\?)))
+         (%special-var (char name 0)))
+        (t (or (sb-ext:posix-getenv name) ""))))
+
 (defun %expand-vars (string)
-  "Replace $NAME and ${NAME} in STRING with the environment value (empty if
-unset).  A `$` not starting a valid reference stays literal."
+  "Replace $NAME / ${NAME} with an environment value, and the script parameters
+$0 $1 … $# $@ $* $? with their values (empty when unset/out of range).  A bare
+$<digits> is the whole number (use ${N} next to more digits).  A `$` not starting
+a valid reference stays literal."
   (if (find #\$ string)
       (with-output-to-string (out)
         (let ((i 0) (n (length string)))
           (loop while (< i n) do
             (if (char= (char string i) #\$)
-                (multiple-value-bind (name next) (%var-ref-at string (1+ i))
-                  (if name
-                      (progn (write-string (or (sb-ext:posix-getenv name) "") out)
-                             (setf i next))
-                      (progn (write-char #\$ out) (incf i))))
+                (let ((nxt (and (< (1+ i) n) (char string (1+ i)))))
+                  (cond
+                    ;; $#  $@  $*  $?
+                    ((and nxt (member nxt '(#\# #\@ #\* #\?)))
+                     (write-string (%special-var nxt) out) (incf i 2))
+                    ;; $<digits> — positional parameter
+                    ((and nxt (digit-char-p nxt))
+                     (let ((end (or (position-if-not #'digit-char-p string :start (1+ i)) n)))
+                       (write-string (%positional-arg
+                                      (parse-integer string :start (1+ i) :end end)) out)
+                       (setf i end)))
+                    ;; $NAME / ${NAME}
+                    (t (multiple-value-bind (name next) (%var-ref-at string (1+ i))
+                         (if name
+                             (progn (write-string (%resolve-var name) out) (setf i next))
+                             (progn (write-char #\$ out) (incf i)))))))
                 (progn (write-char (char string i) out) (incf i))))))
       string))
+
+;;; --- option parsing for scripts -------------------------------------------
+
+(defun %spec-value-p (type)
+  "True when a spec TYPE takes a value (string), false for a boolean flag.
+Matched by name so `string`/`boolean` in any package (or the keywords) work."
+  (let ((name (string type)))
+    (cond ((string-equal name "STRING") t)
+          ((string-equal name "BOOLEAN") nil)
+          (t (error 'shell-parse-error :line (format nil "parse-args: bad option type ~S" type))))))
+
+(defun %find-option (flag spec)
+  "The spec entry (KEY FLAG... TYPE) whose flags include FLAG, or NIL."
+  (find-if (lambda (entry) (member flag (butlast (rest entry)) :test #'string=)) spec))
+
+(defun parse-args (args spec)
+  "Parse ARGS (a list of strings) against SPEC and return (values OPTIONS-PLIST
+POSITIONALS).  Each SPEC entry is (KEY FLAG... TYPE): FLAGs are option strings
+like \"-v\"/\"--verbose\", TYPE is boolean or string.  Supports --opt=val,
+--opt val, -o val, -o=val, and `--` to end option parsing.  A boolean option sets
+its KEY to T; a missing value or an unknown option signals an error."
+  (let ((opts '()) (positionals '()) (rest args) (end-of-opts nil))
+    (loop while rest do
+      (let ((arg (pop rest)))
+        (cond
+          (end-of-opts (push arg positionals))
+          ((string= arg "--") (setf end-of-opts t))
+          ((and (> (length arg) 1) (char= (char arg 0) #\-))
+           (let* ((eq (position #\= arg))
+                  (flag (if eq (subseq arg 0 eq) arg))
+                  (inline-val (and eq (subseq arg (1+ eq))))
+                  (entry (%find-option flag spec)))
+             (unless entry
+               (error 'shell-parse-error :line (format nil "parse-args: unknown option ~A" flag)))
+             (let ((key (first entry)))
+               (if (%spec-value-p (car (last entry)))
+                   (let ((val (or inline-val
+                                  (if rest (pop rest)
+                                      (error 'shell-parse-error
+                                             :line (format nil "parse-args: ~A needs a value" flag))))))
+                     (setf (getf opts key) val))
+                   (setf (getf opts key) t)))))
+          (t (push arg positionals)))))
+    (values opts (nreverse positionals))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Globbing (SPEC §1: a function returning pathname objects)
@@ -634,6 +725,44 @@ desugared command.  Records (form . result) in *history*.  Returns
         (let ((result (eval form)))
           (when record (record-history form result))
           (values result form)))))
+
+(defun %blank-or-comment-p (line)
+  "True for a blank line or one whose first non-blank character is `#` (so a
+`#!` shebang and comments are skipped)."
+  (let ((tr (string-left-trim '(#\Space #\Tab) line)))
+    (or (zerop (length tr)) (char= (char tr 0) #\#))))
+
+(defun %eval-script-lines (next-line)
+  "Run a script whose lines come from NEXT-LINE (a thunk returning the next line
+string or NIL at EOF).  Blank / `#`-comment lines are skipped when not mid-form;
+multi-line Lisp forms accumulate via INPUT-COMPLETE-P.  Each statement resets
+*LAST-STATUS* then evaluates; a SHELL-EXIT propagates to the caller; any other
+error is reported and sets *LAST-STATUS* to 1, then execution continues.  Returns
+the final *LAST-STATUS*."
+  (let ((buffer nil))
+    (flet ((run (text)
+             (handler-case
+                 (progn
+                   (setf *last-status* 0)
+                   (let ((result (shell-eval text :record nil)))
+                     ;; a command line's result IS its output — present it to
+                     ;; stdout as the REPL would; a Lisp form stays silent unless
+                     ;; it prints itself
+                     (unless (%lisp-line-p (string-left-trim '(#\Space #\Tab) text))
+                       (present result))))
+               (shell-exit (c) (error c))                 ; propagate to the script runner
+               (error (e) (setf *last-status* 1)
+                 (format *error-output* "~&consh: ~A~%" e)))))
+      (loop for line = (funcall next-line) while line do
+        (cond
+          (buffer                                          ; accumulating a multi-line form
+           (setf buffer (concatenate 'string buffer (string #\Newline) line))
+           (when (input-complete-p buffer) (run buffer) (setf buffer nil)))
+          ((%blank-or-comment-p line))                     ; skip
+          ((input-complete-p line) (run line))
+          (t (setf buffer line))))                         ; start a multi-line form
+      (when buffer (run buffer))))                         ; trailing incomplete: eval (errors cleanly)
+  *last-status*)
 
 ;;; ---------------------------------------------------------------------------
 ;;; User init file (SPEC §1: the environment is the image — configure it in Lisp)
