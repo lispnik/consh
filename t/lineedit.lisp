@@ -61,6 +61,21 @@ line editor's cursor math (which counts raw characters) stays correct."
   (is (= 6 (consh::%display-width
             (concatenate 'string (colorize "foo" :blue) (colorize "bar" :red))))))
 
+(test char-width-handles-wide-and-combining
+  (is (= 1 (consh::%char-width #\a)))
+  (is (= 2 (consh::%char-width (code-char #x4e16))))    ; 世 East-Asian wide
+  (is (= 0 (consh::%char-width (code-char #x0301))))    ; combining acute accent
+  (is (= 2 (consh::%char-width (code-char #x1F600))))   ; emoji (wide)
+  (is (= 0 (consh::%char-width (code-char 7)))))        ; control char (bell)
+
+(test display-width-counts-columns-not-characters
+  (is (= 4 (consh::%display-width "a世b")))              ; 1 + 2 + 1 columns
+  (is (= 3 (consh::%display-width "a世b" 0 2)))          ; range: a + 世
+  ;; a base letter plus a combining mark is one column, not two
+  (is (= 1 (consh::%display-width (coerce (list #\e (code-char #x0301)) 'string))))
+  ;; ASCII width is still the character count
+  (is (= 9 (consh::%display-width "ls | grep"))))
+
 (test backspace-and-delete
   (let ((ed (make-ledit)))
     (type-string ed "abcd")

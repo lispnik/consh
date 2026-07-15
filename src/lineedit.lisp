@@ -8,6 +8,9 @@
 
 (in-package #:consh)
 
+;;; SB-UNICODE (east-asian-width + general-category, used by %char-width) is part
+;;; of the SBCL core, so it needs no require.
+
 ;;; ---------------------------------------------------------------------------
 ;;; Line history (raw command strings, distinct from the (form . result) *history*)
 ;;; ---------------------------------------------------------------------------
@@ -663,20 +666,32 @@ signal-interrupted syscalls when FD is given."
       ((< (char-code c) 32) :redraw)
       (t c))))
 
-(defun %display-width (string)
-  "The visible column width of STRING, skipping ANSI CSI escape sequences (ESC `[`
-… final byte 0x40-0x7E) so a colored prompt still positions the cursor correctly
-— a raw (length ...) would count the invisible escape bytes and land too far."
-  (let ((n (length string)) (i 0) (w 0))
-    (loop while (< i n) do
+(defun %char-width (char)
+  "Display columns occupied by CHAR: 0 for combining/format marks and control
+characters, 2 for East-Asian wide/fullwidth (most CJK and many emoji), else 1.
+This is the wcwidth(3) analogue that keeps the cursor aligned on wide text."
+  (let ((code (char-code char)))
+    (cond
+      ((or (< code 32) (<= #x7f code #x9f)) 0)                         ; C0/C1 controls
+      ((member (sb-unicode:general-category char) '(:mn :me :cf)) 0)   ; combining/format
+      ((member (sb-unicode:east-asian-width char) '(:w :f)) 2)         ; wide/fullwidth
+      (t 1))))
+
+(defun %display-width (string &optional (start 0) (end (length string)))
+  "The visible column WIDTH of STRING[START:END]: skips ANSI CSI escape sequences
+(ESC `[` … final byte 0x40-0x7E) so a coloured prompt doesn't skew the count, and
+sums per-character display columns (wide = 2, combining = 0) so the cursor stays
+aligned on CJK/emoji/combining text — a raw (length ...) would land wrong on both."
+  (let ((i start) (w 0))
+    (loop while (< i end) do
       (let ((c (char string i)))
         (cond
-          ((and (char= c #\Escape) (< (1+ i) n) (char= (char string (1+ i)) #\[))
+          ((and (char= c #\Escape) (< (1+ i) end) (char= (char string (1+ i)) #\[))
            (incf i 2)                          ; skip ESC [
-           (loop while (and (< i n) (not (<= 64 (char-code (char string i)) 126)))
+           (loop while (and (< i end) (not (<= 64 (char-code (char string i)) 126)))
                  do (incf i))                  ; skip parameter/intermediate bytes
-           (when (< i n) (incf i)))            ; skip the final byte
-          (t (incf w) (incf i)))))
+           (when (< i end) (incf i)))          ; skip the final byte
+          (t (incf w (%char-width c)) (incf i)))))
     w))
 
 (defun %redraw (ed prompt out)
@@ -688,9 +703,11 @@ it so typing continues at point."
     (format out "~C[2K~C~A~A" #\Escape #\Return prompt (%highlight (ledit-text ed)))
     (when suggestion
       (format out "~C[90m~A~C[0m" #\Escape suggestion #\Escape))        ; dim grey ghost text
-    ;; column = visible prompt width + point (1-based); %display-width so ANSI
-    ;; color escapes in the prompt do not skew the cursor position
-    (format out "~C[~DG" #\Escape (+ 1 (%display-width prompt) (ledit-point ed)))
+    ;; cursor column (1-based) = prompt columns + the display columns of the text
+    ;; before point — both wide-char aware, so CJK/emoji keep the cursor aligned
+    (format out "~C[~DG" #\Escape
+            (+ 1 (%display-width prompt)
+               (%display-width (ledit-text ed) 0 (ledit-point ed))))
     (finish-output out)))
 
 (defun %search-prompt (ed)
