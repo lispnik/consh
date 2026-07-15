@@ -118,7 +118,11 @@ or unreadable file is ignored.  Returns the resulting entry count."
   (coalescing nil)                       ; T mid insert-run, so it is one undo unit
   ;; yank-pop (M-y) state
   (yank-mark nil)                        ; start index of the last yank, else NIL
-  (yank-idx 0 :type fixnum))             ; kill-ring index of the last yank
+  (yank-idx 0 :type fixnum)              ; kill-ring index of the last yank
+  ;; multi-row wrapping bookkeeping (linenoise-style refresh)
+  (render-oldpos 0 :type fixnum)         ; cursor column-from-prompt-start last paint
+  (render-oldrows 0 :type fixnum)        ; physical rows the last paint occupied
+  (render-crow 0 :type fixnum))          ; 0-based row the cursor is on within them
 
 (defun make-ledit (&optional (history *line-history*))
   (%make-ledit :history (coerce history 'vector)))
@@ -694,21 +698,75 @@ aligned on CJK/emoji/combining text — a raw (length ...) would land wrong on b
           (t (incf w (%char-width c)) (incf i)))))
     w))
 
-(defun %redraw (ed prompt out)
-  "Repaint the prompt + line and place the cursor, using ANSI escapes.  Any
-autosuggestion is drawn dim after the text; the cursor is then placed back before
-it so typing continues at point."
-  (let ((suggestion (%ledit-suggestion ed)))
-    ;; clear line, home, prompt + syntax-highlighted text (escapes add no width)
-    (format out "~C[2K~C~A~A" #\Escape #\Return prompt (%highlight (ledit-text ed)))
-    (when suggestion
-      (format out "~C[90m~A~C[0m" #\Escape suggestion #\Escape))        ; dim grey ghost text
-    ;; cursor column (1-based) = prompt columns + the display columns of the text
-    ;; before point — both wide-char aware, so CJK/emoji keep the cursor aligned
-    (format out "~C[~DG" #\Escape
-            (+ 1 (%display-width prompt)
-               (%display-width (ledit-text ed) 0 (ledit-point ed))))
+(defun %query-terminal-columns ()
+  "The terminal width in columns via `stty size` (which prints \"ROWS COLS\" for
+the terminal on its standard input), or NIL if it can't be determined."
+  (ignore-errors
+    (let* ((text (with-output-to-string (s)
+                   (sb-ext:run-program "stty" '("size") :input t :output s
+                                       :search t :error nil)))
+           (parts (%split-string (string-trim '(#\Space #\Tab #\Newline #\Return) text)
+                                 #\Space)))
+      (when (= 2 (length parts))
+        (let ((c (parse-integer (second parts) :junk-allowed t)))
+          (and c (plusp c) c))))))
+
+(defun %redraw (ed prompt out cols)
+  "Repaint the prompt + line + dim autosuggestion, wrapping at COLS columns, and
+place the cursor at point.  A port of linenoise's multi-line refresh, adapted to
+count display columns (so wide chars wrap correctly): it steps down to the last
+previously-drawn row, clears the old rows bottom-up, reprints, then moves the
+cursor to its (row, column).  Row/column state is remembered on ED."
+  (let* ((cols  (max 1 cols))
+         (raw   (ledit-text ed))
+         (point (ledit-point ed))
+         (text  (%highlight raw))
+         (sug   (or (%ledit-suggestion ed) ""))
+         (pcols (%display-width prompt))
+         (tcols (%display-width raw))
+         (scols (%display-width sug))
+         (len   (+ tcols scols))                        ; content columns after prompt
+         (pos   (%display-width raw 0 point))           ; cursor columns from prompt start
+         ;; edge case: cursor at end AND content exactly fills the last row — the
+         ;; terminal leaves the cursor pending-wrap, so force an extra row.
+         (edge  (and (= point (length raw)) (zerop scols)
+                     (plusp (+ pcols len)) (zerop (mod (+ pcols len) cols))))
+         (rows  (+ (max 1 (ceiling (+ pcols len) cols)) (if edge 1 0)))
+         (oldrows (ledit-render-oldrows ed))
+         (rpos  (1+ (floor (+ pcols (ledit-render-oldpos ed)) cols)))  ; old cursor row, 1-based
+         (s (make-string-output-stream)))
+    ;; 1. move down to the last row of the previous render
+    (when (> (- oldrows rpos) 0)
+      (format s "~C[~DB" #\Escape (- oldrows rpos)))
+    ;; 2. clear each old row from the bottom up
+    (dotimes (j (max 0 (1- oldrows)))
+      (format s "~C~C[0K~C[1A" #\Return #\Escape #\Escape))
+    ;; 3. clear the top row
+    (format s "~C~C[0K" #\Return #\Escape)
+    ;; 4. prompt + highlighted text + dim suggestion
+    (write-string prompt s)
+    (write-string text s)
+    (unless (zerop scols) (format s "~C[90m~A~C[0m" #\Escape sug #\Escape))
+    ;; 5. force the wrap when we filled the last column at end of line
+    (when edge (format s "~C~C" #\Return #\Newline))
+    ;; 6/7. move up to the cursor's row, then to its column
+    (let ((rpos2 (1+ (floor (+ pcols pos) cols)))
+          (col   (mod (+ pcols pos) cols)))
+      (when (> (- rows rpos2) 0) (format s "~C[~DA" #\Escape (- rows rpos2)))
+      (write-char #\Return s)
+      (when (plusp col) (format s "~C[~DC" #\Escape col))
+      (setf (ledit-render-crow ed) (1- rpos2)))
+    (setf (ledit-render-oldpos ed) pos
+          (ledit-render-oldrows ed) rows)
+    (write-string (get-output-stream-string s) out)
     (finish-output out)))
+
+(defun %end-of-content (ed out)
+  "Move the cursor to column 0 on the last wrapped row, so following output
+(a newline, a completion list) begins below the whole input, not mid-line."
+  (let ((below (- (ledit-render-oldrows ed) 1 (ledit-render-crow ed))))
+    (when (plusp below) (format out "~C[~DB" #\Escape below)))
+  (write-char #\Return out))
 
 (defun %search-prompt (ed)
   "The transient prompt shown during ^R reverse-search, e.g.
@@ -723,12 +781,15 @@ Returns the line string, NIL on EOF, or (when ABORT-ON-CANCEL) :cancelled if the
 line was aborted with ^C — used to bail out of a multi-line continuation."
   (let* ((ed (make-ledit))
          (fd (%terminal-fd-of in))
+         ;; terminal width for wrapping long lines (re-queried per line so a
+         ;; between-lines resize is picked up); fall back to 80 columns
+         (cols (or (%query-terminal-columns) 80))
          ;; snapshot the exact terminal state so we can restore it with a single
          ;; tcsetattr syscall — robust against a preempted `stty sane` subprocess
          (saved (and fd (save-termios fd))))
     (flet ((repaint ()
              ;; while searching, the prompt becomes the incremental-search prompt
-             (%redraw ed (if (ledit-searching ed) (%search-prompt ed) prompt) out)))
+             (%redraw ed (if (ledit-searching ed) (%search-prompt ed) prompt) out cols)))
       (%stty '("-echo" "-icanon" "min" "1" "time" "0"))
       (unwind-protect
            (progn
@@ -736,17 +797,29 @@ line was aborted with ^C — used to bail out of a multi-line continuation."
              (loop
                (let ((action (ledit-key ed (%read-key in fd))))
                  (case action
-                   (:submit (format out "~%") (return (ledit-text ed)))
-                   (:cancel (format out "^C~%")
+                   (:submit (%end-of-content ed out) (format out "~%")
+                            (return (ledit-text ed)))
+                   (:cancel (%end-of-content ed out) (format out "^C~%")
                             (if abort-on-cancel
                                 (return :cancelled)          ; bail out of continuation
                                 (progn (%ledit-set-line ed "")
-                                       (setf (ledit-hidx ed) nil))))
+                                       (setf (ledit-render-oldrows ed) 0
+                                             (ledit-render-oldpos ed) 0
+                                             (ledit-render-crow ed) 0
+                                             (ledit-hidx ed) nil)
+                                       (repaint))))
                    (:clear (format out "~C[2J~C[H" #\Escape #\Escape)  ; ^L: wipe + home
+                           (setf (ledit-render-oldrows ed) 0
+                                 (ledit-render-oldpos ed) 0
+                                 (ledit-render-crow ed) 0)
                            (repaint))
-                   (:eof (format out "~%") (return nil))
+                   (:eof (%end-of-content ed out) (format out "~%") (return nil))
                    (t (when (and (consp action) (eq (car action) :show))
-                        (format out "~%~{~A~^  ~}~%" (cdr action)))
+                        (%end-of-content ed out)
+                        (format out "~%~{~A~^  ~}~%" (cdr action))
+                        (setf (ledit-render-oldrows ed) 0
+                              (ledit-render-oldpos ed) 0
+                              (ledit-render-crow ed) 0))
                       (repaint))))))
         ;; restore the captured attributes atomically; fall back to `stty sane`
         ;; only if we could not snapshot them
