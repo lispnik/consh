@@ -129,6 +129,68 @@ line editor's cursor math (which counts raw characters) stays correct."
     (is (string= "abc" (ledit-text ed)))))
 
 ;;; ===========================================================================
+;;; Readline parity: undo, ^D delete-char, yank-pop, yank-last-arg, ^F/^B/^P/^N
+;;; ===========================================================================
+
+(test undo-reverts-edits
+  (let ((ed (make-ledit)))
+    (type-string ed "hello")                      ; one insert run -> one undo unit
+    (ledit-key ed :kill-word-back)                ; -> ""
+    (is (string= "" (ledit-text ed)))
+    (ledit-key ed :undo)                          ; back to "hello"
+    (is (string= "hello" (ledit-text ed)))
+    (ledit-key ed :undo)                          ; back to "" (before the insert run)
+    (is (string= "" (ledit-text ed)))))
+
+(test undo-coalesces-an-insert-run-then-steps-back-per-edit
+  (let ((ed (make-ledit)))
+    (type-string ed "abc")                        ; run 1
+    (ledit-key ed :left) (ledit-key ed :backspace) ; a discrete edit -> "ac"? point moved
+    (is (string= "ac" (ledit-text ed)))
+    (ledit-key ed :undo)                          ; undo the backspace
+    (is (string= "abc" (ledit-text ed)))
+    (ledit-key ed :undo)                          ; undo the whole insert run
+    (is (string= "" (ledit-text ed)))))
+
+(test ctrl-d-deletes-char-midline-but-eofs-when-empty
+  (let ((ed (make-ledit)))
+    (type-string ed "abc") (ledit-key ed :home)
+    (is (eq :redraw (ledit-key ed :eof)))         ; mid-line: delete char under cursor
+    (is (string= "bc" (ledit-text ed)))
+    (is (eq :redraw (ledit-key ed :eof))) (is (string= "c" (ledit-text ed)))
+    (is (eq :redraw (ledit-key ed :eof))) (is (string= "" (ledit-text ed)))
+    (is (eq :eof (ledit-key ed :eof)))))          ; empty line: EOF
+
+(test yank-pop-cycles-the-kill-ring
+  (let ((consh:*kill-ring* '()))
+    (let ((ed (make-ledit)))
+      ;; build a ring by killing whole lines: newest first -> ("two" "one")
+      (type-string ed "one") (ledit-key ed :kill-line)
+      (type-string ed "two") (ledit-key ed :kill-line)
+      (is (equal '("two" "one") consh:*kill-ring*))
+      (ledit-key ed :yank)                        ; inserts "two"
+      (is (string= "two" (ledit-text ed)))
+      (ledit-key ed :yank-pop)                    ; replaces with "one"
+      (is (string= "one" (ledit-text ed)))
+      (ledit-key ed :yank-pop)                    ; cycles back to "two"
+      (is (string= "two" (ledit-text ed))))))
+
+(test yank-last-arg-inserts-last-word-of-previous-command
+  (let ((ed (make-ledit (vector "git commit -m msg" "cd /var/log"))))
+    (type-string ed "ls ")
+    (ledit-key ed :yank-last-arg)                 ; last word of newest entry -> "/var/log"
+    (is (string= "ls /var/log" (ledit-text ed)))))
+
+(test movement-control-keys-decode
+  (is (equal (list :left)  (%keys-from (string (code-char 2)))))   ; ^B
+  (is (equal (list :right) (%keys-from (string (code-char 6)))))   ; ^F
+  (is (equal (list :prev)  (%keys-from (string (code-char 16)))))  ; ^P
+  (is (equal (list :next)  (%keys-from (string (code-char 14)))))  ; ^N
+  (is (equal (list :undo)  (%keys-from (string (code-char 31)))))  ; ^_
+  (is (equal (list :yank-pop)      (%keys-from (format nil "~Cy" #\Escape))))  ; M-y
+  (is (equal (list :yank-last-arg) (%keys-from (format nil "~C." #\Escape))))) ; M-.
+
+;;; ===========================================================================
 ;;; Reverse incremental search (^R)
 ;;; ===========================================================================
 

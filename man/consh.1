@@ -314,7 +314,7 @@ On a terminal, consh provides an Emacs\-style line editor.
 .BR "Ctrl\-A" ", " "Ctrl\-E"
 Move to start / end of line.
 .TP
-.BR "Left" ", " "Right" ", " "Home" ", " "End"
+.BR "Ctrl\-B" ", " "Ctrl\-F" ", " "Left" ", " "Right" ", " "Home" ", " "End"
 Move by character or to line ends.
 .TP
 .BR "Alt\-B" ", " "Alt\-F"
@@ -326,8 +326,15 @@ Kill to end of line / the whole line.
 .BR "Ctrl\-W" ", " "Alt\-D"
 Kill the previous / next word.
 .TP
-.B Ctrl\-Y
-Yank (paste) the most recent kill.
+.BR "Ctrl\-Y" ", " "Alt\-Y"
+Yank (paste) the most recent kill; Alt\-Y then cycles it through the kill ring.
+.TP
+.B Alt\-.
+Insert the last argument of the previous command (also
+.BR Alt\-_ ).
+.TP
+.B Ctrl\-_
+Undo the last edit (repeat to keep undoing).
 .TP
 .B Ctrl\-T
 Transpose the two characters around the cursor.
@@ -335,7 +342,7 @@ Transpose the two characters around the cursor.
 .B Ctrl\-L
 Clear the screen.
 .TP
-.BR "Up" ", " "Down"
+.BR "Ctrl\-P" ", " "Ctrl\-N" ", " "Up" ", " "Down"
 Browse history; a stashed line is restored past the newest entry.
 .TP
 .B Ctrl\-R
@@ -352,8 +359,11 @@ Complete the current token; press
 .B Tab
 again to cycle through the candidates.
 .TP
-.BR "Ctrl\-C" ", " "Ctrl\-D"
-Abort the current line / end of input (on an empty line, exit).
+.B Ctrl\-D
+Delete the character under the cursor, or end input on an empty line (exit).
+.TP
+.B Ctrl\-C
+Abort the current line.
 .SS Completion
 .B Tab
 completes commands (builtins, aliases, wrappers, and

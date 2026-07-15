@@ -109,10 +109,59 @@ or unreadable file is ignored.  Returns the resulting entry count."
   (comp-idx nil)                         ; NIL = showing common prefix, else cycle index
   (comp-start 0 :type fixnum)            ; token start of the last completion
   (comp-point 0 :type fixnum)            ; point right after the last completion
-  (comp-token "" :type string))          ; token text left by the last completion
+  (comp-token "" :type string)           ; token text left by the last completion
+  ;; undo history (a stack of (text . point) snapshots) + insert-run coalescing
+  (undo-stack nil)                       ; most-recent snapshot first
+  (coalescing nil)                       ; T mid insert-run, so it is one undo unit
+  ;; yank-pop (M-y) state
+  (yank-mark nil)                        ; start index of the last yank, else NIL
+  (yank-idx 0 :type fixnum))             ; kill-ring index of the last yank
 
 (defun make-ledit (&optional (history *line-history*))
   (%make-ledit :history (coerce history 'vector)))
+
+;;; --- undo + edit bookkeeping ----------------------------------------------
+
+(defparameter *undo-max* 200 "Cap on retained undo snapshots per line.")
+
+(defun %save-undo (ed)
+  "Push the current (text . point) onto the undo stack, capped."
+  (push (cons (ledit-text ed) (ledit-point ed)) (ledit-undo-stack ed))
+  (when (> (length (ledit-undo-stack ed)) *undo-max*)
+    (setf (ledit-undo-stack ed) (subseq (ledit-undo-stack ed) 0 *undo-max*))))
+
+(defun %note-insert (ed)
+  "Before a self-insert: snapshot once per run of inserts (one undo unit)."
+  (setf (ledit-yank-mark ed) nil)
+  (unless (ledit-coalescing ed)
+    (%save-undo ed)
+    (setf (ledit-coalescing ed) t)))
+
+(defun %note-edit (ed)
+  "Before a discrete edit (kill/yank/transpose/delete): snapshot, end any run."
+  (%save-undo ed)
+  (setf (ledit-coalescing ed) nil (ledit-yank-mark ed) nil))
+
+(defun %break-run (ed)
+  "A non-editing key (movement/history): end the insert run and yank sequence
+without pushing an undo snapshot."
+  (setf (ledit-coalescing ed) nil (ledit-yank-mark ed) nil))
+
+(defun ledit-undo (ed)
+  "^_ : pop the last snapshot, restoring the line and point."
+  (let ((prev (pop (ledit-undo-stack ed))))
+    (when prev
+      (setf (ledit-text ed) (car prev)
+            (ledit-point ed) (min (cdr prev) (length (car prev)))
+            (ledit-coalescing ed) nil (ledit-yank-mark ed) nil))))
+
+(defun %ledit-eof (ed)
+  "^D: delete the character under the cursor mid-line, or signal EOF on an empty
+line (readline's delete-char-or-list-or-eof)."
+  (cond ((zerop (length (ledit-text ed))) :eof)
+        ((< (ledit-point ed) (length (ledit-text ed)))
+         (%note-edit ed) (ledit-delete ed) :redraw)
+        (t :redraw)))
 
 (defun ledit-insert (ed ch)
   (let ((p (ledit-point ed)))
@@ -164,13 +213,47 @@ be yanked on the next.")
   (setf (ledit-text ed) "" (ledit-point ed) 0))
 
 (defun ledit-yank (ed)
-  "^Y: insert the most recent kill at point."
+  "^Y: insert the most recent kill at point, remembering the region so a
+following M-y (yank-pop) can cycle it."
   (let ((s (first *kill-ring*)))
     (when s
       (let ((p (ledit-point ed)))
         (setf (ledit-text ed) (concatenate 'string (subseq (ledit-text ed) 0 p)
                                            s (subseq (ledit-text ed) p))
-              (ledit-point ed) (+ p (length s)))))))
+              (ledit-point ed) (+ p (length s))
+              (ledit-yank-mark ed) p            ; start of the yanked region
+              (ledit-yank-idx ed) 0)))))
+
+(defun ledit-yank-pop (ed)
+  "M-y: only meaningful right after a yank — replace the just-yanked text with
+the next entry in the kill ring, cycling."
+  (when (and (ledit-yank-mark ed) (> (length *kill-ring*) 1))
+    (%save-undo ed)
+    (let* ((start (ledit-yank-mark ed))
+           (end   (ledit-point ed))
+           (next  (mod (1+ (ledit-yank-idx ed)) (length *kill-ring*)))
+           (s     (nth next *kill-ring*))
+           (text  (ledit-text ed)))
+      (setf (ledit-text ed) (concatenate 'string (subseq text 0 start) s (subseq text end))
+            (ledit-point ed) (+ start (length s))
+            (ledit-yank-idx ed) next))))
+
+(defun %last-arg-of (line)
+  "The last whitespace-delimited word of LINE."
+  (let* ((trimmed (string-right-trim '(#\Space #\Tab) line))
+         (sp (position-if (lambda (c) (member c '(#\Space #\Tab))) trimmed :from-end t)))
+    (if sp (subseq trimmed (1+ sp)) trimmed)))
+
+(defun ledit-yank-last-arg (ed)
+  "M-.: insert the last argument of the most recent history entry at point."
+  (let ((h (ledit-history ed)))
+    (when (plusp (length h))
+      (let ((arg (%last-arg-of (aref h (1- (length h))))))
+        (when (plusp (length arg))
+          (let ((p (ledit-point ed)))
+            (setf (ledit-text ed) (concatenate 'string (subseq (ledit-text ed) 0 p)
+                                               arg (subseq (ledit-text ed) p))
+                  (ledit-point ed) (+ p (length arg)))))))))
 
 (defun %word-char-p (c) (alphanumericp c))
 
@@ -409,33 +492,44 @@ via (:show . LIST); pressing Tab again then cycles through them."
 (defun %ledit-normal-key (ed key)
   "Key dispatch during ordinary editing (not in search mode)."
   (if (characterp key)
-      (progn (ledit-insert ed key) :redraw)
+      (progn (%note-insert ed) (ledit-insert ed key) :redraw)
       ;; CASE (not ECASE): an unknown key — including the :redraw that %read-key
       ;; returns for unrecognized escape sequences — is a harmless repaint, never
       ;; a CASE-FAILURE that would crash the editor.
       (case key
-        (:backspace   (ledit-backspace ed) :redraw)
-        (:delete      (ledit-delete ed) :redraw)
-        (:left        (ledit-left ed) :redraw)
-        (:right       (unless (ledit-accept-suggestion ed) (ledit-right ed)) :redraw)
-        (:home        (ledit-home ed) :redraw)
-        (:end         (unless (ledit-accept-suggestion ed) (ledit-end ed)) :redraw)
-        (:kill-to-end (ledit-kill-to-end ed) :redraw)
-        (:kill-line   (ledit-kill-line ed) :redraw)
-        (:kill-word-back    (ledit-kill-word-back ed) :redraw)
-        (:kill-word-forward (ledit-kill-word-forward ed) :redraw)
-        (:back-word    (ledit-backward-word ed) :redraw)
-        (:forward-word (ledit-forward-word ed) :redraw)
-        (:yank        (ledit-yank ed) :redraw)
-        (:transpose   (ledit-transpose ed) :redraw)
+        (:backspace   (%note-edit ed) (ledit-backspace ed) :redraw)
+        (:delete      (%note-edit ed) (ledit-delete ed) :redraw)
+        (:left        (%break-run ed) (ledit-left ed) :redraw)
+        (:right       (%break-run ed)
+                      (if (%ledit-suggestion ed)
+                          (progn (%note-edit ed) (ledit-accept-suggestion ed))
+                          (ledit-right ed))
+                      :redraw)
+        (:home        (%break-run ed) (ledit-home ed) :redraw)
+        (:end         (%break-run ed)
+                      (if (%ledit-suggestion ed)
+                          (progn (%note-edit ed) (ledit-accept-suggestion ed))
+                          (ledit-end ed))
+                      :redraw)
+        (:kill-to-end (%note-edit ed) (ledit-kill-to-end ed) :redraw)
+        (:kill-line   (%note-edit ed) (ledit-kill-line ed) :redraw)
+        (:kill-word-back    (%note-edit ed) (ledit-kill-word-back ed) :redraw)
+        (:kill-word-forward (%note-edit ed) (ledit-kill-word-forward ed) :redraw)
+        (:back-word    (%break-run ed) (ledit-backward-word ed) :redraw)
+        (:forward-word (%break-run ed) (ledit-forward-word ed) :redraw)
+        (:yank        (%note-edit ed) (ledit-yank ed) :redraw)   ; note-edit clears mark; yank re-sets it
+        (:yank-pop    (ledit-yank-pop ed) :redraw)               ; keeps the yank sequence alive
+        (:yank-last-arg (%note-edit ed) (ledit-yank-last-arg ed) :redraw)
+        (:transpose   (%note-edit ed) (ledit-transpose ed) :redraw)
+        (:undo        (%break-run ed) (ledit-undo ed) :redraw)
         (:clear       :clear)               ; ^L — driver clears the screen, repaints
-        (:reverse-search (ledit-reverse-search ed) :redraw)  ; ^R — enter search mode
-        (:prev        (ledit-history-prev ed) :redraw)
-        (:next        (ledit-history-next ed) :redraw)
+        (:reverse-search (%break-run ed) (ledit-reverse-search ed) :redraw)  ; ^R
+        (:prev        (%break-run ed) (ledit-history-prev ed) :redraw)
+        (:next        (%break-run ed) (ledit-history-next ed) :redraw)
         (:tab         (ledit-complete ed))
         (:enter       :submit)
         (:cancel      :cancel)
-        (:eof         (if (zerop (length (ledit-text ed))) :eof :redraw))
+        (:eof         (%ledit-eof ed))      ; delete char mid-line, or EOF on empty
         (t            :redraw))))
 
 (defun ledit-key (ed key)
@@ -536,10 +630,15 @@ signal-interrupted syscalls when FD is given."
       ((char= c (code-char 4)) :eof)             ; ^D
       ((char= c (code-char 1)) :home)            ; ^A
       ((char= c (code-char 5)) :end)             ; ^E
+      ((char= c (code-char 2)) :left)            ; ^B
+      ((char= c (code-char 6)) :right)           ; ^F
+      ((char= c (code-char 16)) :prev)           ; ^P
+      ((char= c (code-char 14)) :next)           ; ^N
       ((char= c (code-char 11)) :kill-to-end)    ; ^K
       ((char= c (code-char 21)) :kill-line)      ; ^U
       ((char= c (code-char 23)) :kill-word-back) ; ^W
       ((char= c (code-char 25)) :yank)           ; ^Y
+      ((char= c (code-char 31)) :undo)           ; ^_
       ((char= c (code-char 12)) :clear)          ; ^L
       ((char= c (code-char 18)) :reverse-search) ; ^R
       ((char= c (code-char 20)) :transpose)      ; ^T
@@ -555,6 +654,8 @@ signal-interrupted syscalls when FD is given."
            ((char= next #\b) :back-word)          ; M-b
            ((char= next #\f) :forward-word)       ; M-f
            ((char= next #\d) :kill-word-forward)  ; M-d
+           ((char= next #\y) :yank-pop)           ; M-y
+           ((or (char= next #\.) (char= next #\_)) :yank-last-arg) ; M-. / M-_
            ((or (char= next #\Rubout) (char= next #\Backspace)) :kill-word-back) ; M-DEL
            (t :redraw))))
       ;; any other control char (^B ^F ^R ...) is not an insertable character —

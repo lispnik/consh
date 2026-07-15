@@ -143,12 +143,13 @@ colours never shift the cursor.
 
 The line editor is Emacs-ish and does the things a daily-driver shell should:
 
-- **Editing keys** — `^A/^E` (line start/end), `^K/^U` (kill to end / whole line),
-  `^W` (kill word back), `M-d` (kill word forward), `M-b/M-f` (word motion),
-  `^Y` (yank from the kill-ring), `^T` (transpose), `^L` (clear screen), arrows,
-  Home/End.
-- **History** — Up/Down browse it, `^R` is incremental reverse-search, and it
-  **persists** to `<config>/consh/history` across sessions.
+- **Editing keys** — `^A/^E` (line start/end), `^B/^F` (char motion), `^K/^U`
+  (kill to end / whole line), `^W` (kill word back), `M-d` (kill word forward),
+  `M-b/M-f` (word motion), `^Y` (yank), `M-y` (yank-pop), `M-.` (last arg of the
+  previous command), `^T` (transpose), `^D` (delete char / EOF), `^_` (undo),
+  `^L` (clear screen), arrows, Home/End.
+- **History** — Up/Down or `^P/^N` browse it, `^R` is incremental reverse-search,
+  and it **persists** to `<config>/consh/history` across sessions.
 - **Autosuggestions** — as you type, the tail of the most recent matching history
   entry is shown dim; Right or End accepts it. (`*autosuggest*`)
 - **Syntax highlighting** — the command word is green when it resolves and red
