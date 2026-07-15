@@ -449,12 +449,15 @@ name the shell's own vocabulary unqualified — pipe, pipeline-collect, external
 (test eval-script-lines-skips-shebang-and-accumulates-multiline
   (let* ((nl (string #\Newline))
          (script (concatenate 'string
-                              "#!/x/consh" nl "# a comment" nl nl
+                              "#!/x/consh" nl "# a shell comment" nl
+                              ";; a lisp comment" nl nl
                               "(format t \"sum=~A\" (+ 1" nl "   2" nl "   3))" nl))
          (in (make-string-input-stream script))
          (out (with-output-to-string (*standard-output*)
                 (%eval-script-lines (lambda () (read-line in nil nil))))))
-    (is (string= "sum=6" out))))                          ; shebang/comment/blank skipped, form joined
+    ;; #! shebang, # and ; comments, and the blank line are all skipped, and the
+    ;; three-line form is joined and evaluated
+    (is (string= "sum=6" out))))
 
 (test eval-script-lines-propagates-exit
   (let ((in (make-string-input-stream (format nil "exit 5~%echo after~%"))))

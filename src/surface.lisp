@@ -727,10 +727,10 @@ desugared command.  Records (form . result) in *history*.  Returns
           (values result form)))))
 
 (defun %blank-or-comment-p (line)
-  "True for a blank line or one whose first non-blank character is `#` (so a
-`#!` shebang and comments are skipped)."
+  "True for a blank line, or a comment: first non-blank char `#` (shell-style, so
+a `#!` shebang is skipped) or `;` (Lisp-style, for scripts that are mostly Lisp)."
   (let ((tr (string-left-trim '(#\Space #\Tab) line)))
-    (or (zerop (length tr)) (char= (char tr 0) #\#))))
+    (or (zerop (length tr)) (member (char tr 0) '(#\# #\;)))))
 
 (defun %eval-script-lines (next-line)
   "Run a script whose lines come from NEXT-LINE (a thunk returning the next line
