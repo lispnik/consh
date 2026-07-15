@@ -426,6 +426,35 @@ namestring (e.g. one containing `[`), which raw probe-file/truename would error
 on."
   (ignore-errors (probe-file pathspec)))
 
+;;; ---------------------------------------------------------------------------
+;;; Shared path/string helpers (used by parsing, completion, highlighting)
+;;; ---------------------------------------------------------------------------
+
+(defun %split-string (string char)
+  (loop with start = 0
+        for pos = (position char string :start start)
+        collect (subseq string start pos)
+        while pos do (setf start (1+ pos))))
+
+(defun %as-directory (namestring)
+  (if (and (plusp (length namestring))
+           (char= (char namestring (1- (length namestring))) #\/))
+      namestring
+      (concatenate 'string namestring "/")))
+
+(defun %find-on-path (name)
+  "First executable path for NAME: if NAME contains `/`, resolve it directly;
+otherwise search $PATH.  Returns a namestring or NIL."
+  (if (find #\/ name)
+      (let ((p (%safe-probe (merge-pathnames name *current-directory*))))
+        (and p (namestring p)))
+      (let ((path (sb-ext:posix-getenv "PATH")))
+        (when path
+          (loop for dir in (%split-string path #\:)
+                thereis (and (plusp (length dir))
+                             (let ((p (%safe-probe (merge-pathnames name (%as-directory dir)))))
+                               (and p (namestring p)))))))))
+
 (defun %directory-arg-p (word)
   "True when WORD names an existing directory relative to *current-directory*."
   (let ((p (%safe-probe (merge-pathnames (%ensure-directory-pathname word)
@@ -503,7 +532,7 @@ or for a pure-Lisp pipeline (no process group).  Records the exit status in
         (%run-foreground pipeline))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Builtins (SPEC §1: the user environment is the image)
+;;; Builtin machinery (definitions live in builtins.lisp)
 ;;; ---------------------------------------------------------------------------
 
 (define-condition shell-exit (error)
@@ -525,264 +554,6 @@ or for a pure-Lisp pipeline (no process group).  Records the exit status in
       namestring
       (concatenate 'string namestring "/")))
 
-(defun %job-spec->job (spec)
-  "Resolve a job spec (\"%2\", \"2\", or NIL for the most recent) to a job."
-  (if (null spec)
-      (car (last (all-jobs)))
-      (let ((id (parse-integer (string-left-trim "%" spec) :junk-allowed t)))
-        (and id (find-job id)))))
-
-(defun %cd-to (dir)
-  "Switch *current-directory* to DIR (resolved against the current directory),
-recording *previous-directory*.  Signals a shell-parse-error if it doesn't exist.
-Returns the new truename."
-  (let ((new (handler-case
-                 (truename (merge-pathnames (%ensure-directory-pathname dir)
-                                            *current-directory*))
-               (file-error () (error 'shell-parse-error :line
-                                     (format nil "cd: no such directory: ~A" dir))))))
-    (setf *previous-directory* *current-directory*
-          *current-directory* new)
-    new))
-
-(defun %cdpath-search (arg)
-  "If ARG is a bare relative name (no `/`, not `.`/`..`) that isn't present in the
-current directory but is found under a $CDPATH entry, return that path; else NIL."
-  (unless (or (find #\/ arg) (string= arg ".") (string= arg ".."))
-    (let ((cdpath (sb-ext:posix-getenv "CDPATH")))
-      (when cdpath
-        (loop for dir in (%split-string cdpath #\:)
-              thereis (and (plusp (length dir))
-                           (let ((p (%safe-probe (merge-pathnames (%ensure-directory-pathname arg)
-                                                                 (%as-directory dir)))))
-                             (and p (namestring p)))))))))
-
-(define-builtin "cd"
-  (lambda (args)
-    (let* ((arg (first args))
-           (target
-             (cond ((null arg) (namestring (user-homedir-pathname)))
-                   ((and (string= arg "-") *previous-directory*)
-                    (namestring *previous-directory*))
-                   ;; a bare name not in cwd may live under $CDPATH
-                   ((and (not (%safe-probe (merge-pathnames (%ensure-directory-pathname arg)
-                                                           *current-directory*)))
-                         (%cdpath-search arg)))
-                   (t arg))))
-      (namestring (%cd-to target)))))
-
-(define-builtin "pwd" (lambda (args) (declare (ignore args))
-                        (namestring *current-directory*)))
-
-(define-builtin "exit"
-  (lambda (args)
-    (error 'shell-exit :code (if args (or (parse-integer (first args) :junk-allowed t) 0) 0))))
-
-(define-builtin "export"
-  (lambda (args)
-    (dolist (a args)
-      (let ((eq (position #\= a)))
-        (when eq (sb-posix:setenv (subseq a 0 eq) (subseq a (1+ eq)) 1))))
-    (values)))
-
-(define-builtin "unset"
-  (lambda (args) (dolist (a args) (ignore-errors (sb-posix:unsetenv a))) (values)))
-
-(define-builtin "alias"
-  (lambda (args)
-    (if args
-        (progn (dolist (a args)
-                 (let ((eq (position #\= a)))
-                   (when eq (define-alias (subseq a 0 eq) (subseq a (1+ eq))))))
-               (values))
-        (loop for k being the hash-keys of *aliases* using (hash-value v)
-              collect (format nil "~A=~A" k v)))))
-
-(define-builtin "unalias"
-  (lambda (args) (dolist (a args) (remove-alias a)) (values)))
-
-(define-builtin "jobs" (lambda (args) (declare (ignore args)) (all-jobs)))
-(define-builtin "fg" (lambda (args) (fg (%job-spec->job (first args)))))
-(define-builtin "bg" (lambda (args) (bg (%job-spec->job (first args)))))
-
-(defun %require-job (spec)
-  (or (%job-spec->job spec)
-      (error 'shell-parse-error :line (format nil "no such job: ~A" (or spec "")))))
-
-(defun %job-ref-p (s) (and (stringp s) (plusp (length s)) (char= (char s 0) #\%)))
-
-(defparameter +signal-names+
-  `(("TERM" . ,+sigterm+) ("KILL" . ,+sigkill+) ("INT" . ,+sigint+) ("HUP" . 1)
-    ("STOP" . ,+sigstop+) ("CONT" . ,+sigcont+) ("TSTP" . ,+sigtstp+)
-    ("QUIT" . 3) ("USR1" . ,(if (member :darwin *features*) 30 10)))
-  "Signal name -> number for the kill builtin.")
-
-(defun %parse-signal (spec)
-  "SPEC is a signal name or number without the leading dash: \"9\", \"KILL\",
-\"SIGKILL\"."
-  (let ((s (string-upcase spec)))
-    (when (and (>= (length s) 3) (string= (subseq s 0 3) "SIG")) (setf s (subseq s 3)))
-    (or (parse-integer s :junk-allowed t)
-        (cdr (assoc s +signal-names+ :test #'string=))
-        (error 'shell-parse-error :line (format nil "kill: unknown signal: ~A" spec)))))
-
-(defun %parse-kill-args (args)
-  "Split ARGS into (values SIGNAL TARGETS): a leading -SIG (name or number) sets
-the signal, defaulting to SIGTERM."
-  (if (and args (> (length (first args)) 1) (char= (char (first args) 0) #\-))
-      (values (%parse-signal (subseq (first args) 1)) (rest args))
-      (values +sigterm+ args)))
-
-(define-builtin "kill"
-  ;; kill [-SIGNAL] (%job | pid)...  A %job is terminated through the job (its
-  ;; whole process group + threads reclaimed); a bare pid is signalled directly.
-  (lambda (args)
-    (multiple-value-bind (signal targets) (%parse-kill-args args)
-      (unless targets (error 'shell-parse-error :line "kill: no target"))
-      ;; Signal every target we can; collect the malformed ones and report them
-      ;; once at the end, so one bad pid does not leave the rest un-signalled.
-      (let ((bad '()))
-        (dolist (target targets)
-          (if (%job-ref-p target)
-              (kill-job (%require-job target))
-              (let ((pid (parse-integer target :junk-allowed t)))
-                (if pid
-                    (ignore-errors (c-kill pid signal))
-                    (push target bad)))))
-        (when bad
-          (error 'shell-parse-error
-                 :line (format nil "kill: illegal pid: ~{~A~^ ~}" (nreverse bad)))))
-      (values))))
-
-(define-builtin "wait"
-  ;; wait [%job] — wait for one job (returning its output) or, with no argument,
-  ;; every job.
-  (lambda (args)
-    (if args
-        (wait-job (%require-job (first args)))
-        (progn (dolist (j (all-jobs)) (ignore-errors (wait-job j))) (values)))))
-
-(define-builtin "history"
-  (lambda (args) (declare (ignore args))
-    (loop for i below (history-count) collect (cons i (history-form i)))))
-
-;;; --- directory stack: pushd / popd / dirs --------------------------------
-
-(defvar *dir-stack* '()
-  "Directory stack for pushd/popd, most-recently-pushed first; excludes the
-current directory (which is always the stack's implicit top).")
-
-(defun %dirs-list ()
-  "The directory stack for display: current directory first, then pushed dirs."
-  (cons (namestring *current-directory*) (mapcar #'namestring *dir-stack*)))
-
-(define-builtin "pushd"
-  (lambda (args)
-    (let ((arg (first args)))
-      (if (null arg)
-          ;; no argument: swap the current directory with the top of the stack
-          (if *dir-stack*
-              (let ((cur *current-directory*))
-                (%cd-to (namestring (pop *dir-stack*)))
-                (push cur *dir-stack*))
-              (error 'shell-parse-error :line "pushd: directory stack empty"))
-          (progn (push *current-directory* *dir-stack*)
-                 (%cd-to arg))))
-    (%dirs-list)))
-
-(define-builtin "popd"
-  (lambda (args) (declare (ignore args))
-    (if *dir-stack*
-        (progn (%cd-to (namestring (pop *dir-stack*))) (%dirs-list))
-        (error 'shell-parse-error :line "popd: directory stack empty"))))
-
-(define-builtin "dirs" (lambda (args) (declare (ignore args)) (%dirs-list)))
-
-;;; --- discoverability: help / type / which --------------------------------
-
-(defparameter *builtin-docs*
-  '(("cd"      . "cd [DIR]         change directory (handles ~, -, CDPATH; no arg = home)")
-    ("pwd"     . "pwd              print the current directory")
-    ("pushd"   . "pushd [DIR]      cd to DIR, pushing the current dir onto the stack")
-    ("popd"    . "popd             cd to the directory popped off the stack")
-    ("dirs"    . "dirs             list the directory stack")
-    ("export"  . "export N=V ...   set environment variables")
-    ("unset"   . "unset NAME ...   remove environment variables")
-    ("alias"   . "alias [N=V ...]  define or list aliases")
-    ("unalias" . "unalias N ...    remove aliases")
-    ("jobs"    . "jobs             list background/stopped jobs")
-    ("fg"      . "fg [%JOB]        resume a job in the foreground")
-    ("bg"      . "bg [%JOB]        resume a job in the background")
-    ("kill"    . "kill [-SIG] JOB  signal a job")
-    ("wait"    . "wait [JOB]       wait for a job (or all jobs) to finish")
-    ("history" . "history          list past command forms")
-    ("source"  . "source FILE      run each line of FILE as shell input (also `.`)")
-    ("type"    . "type NAME ...    report how each NAME resolves")
-    ("which"   . "which NAME ...   print the path of each external NAME")
-    ("help"    . "help [NAME ...]  list builtins, or describe the named ones")
-    ("exit"    . "exit [N]         leave the shell"))
-  "One-line help for each builtin, shown by the `help` builtin.")
-
-(define-builtin "help"
-  (lambda (args)
-    (if args
-        (loop for name in args
-              collect (or (cdr (assoc name *builtin-docs* :test #'string=))
-                          (format nil "~A: not a builtin" name)))
-        (cons "consh builtins (help NAME for one):"
-              (sort (loop for k being the hash-keys of *builtins*
-                          collect (or (cdr (assoc k *builtin-docs* :test #'string=)) k))
-                    #'string<)))))
-
-(defun %find-on-path (name)
-  "First executable path for NAME: if NAME contains `/`, resolve it directly;
-otherwise search $PATH.  Returns a namestring or NIL."
-  (if (find #\/ name)
-      (let ((p (%safe-probe (merge-pathnames name *current-directory*))))
-        (and p (namestring p)))
-      (let ((path (sb-ext:posix-getenv "PATH")))
-        (when path
-          (loop for dir in (%split-string path #\:)
-                thereis (and (plusp (length dir))
-                             (let ((p (%safe-probe (merge-pathnames name (%as-directory dir)))))
-                               (and p (namestring p)))))))))
-
-(defun %classify-command (name)
-  "A human-readable line describing how NAME resolves at the prompt."
-  (cond
-    ((builtin-p name) (format nil "~A is a shell builtin" name))
-    ((gethash name *aliases*)
-     (format nil "~A is aliased to `~A'" name (gethash name *aliases*)))
-    ((nth-value 1 (gethash name *wrappers*))
-     (format nil "~A is a wrapped command~@[ (~A)~]" name (%find-on-path name)))
-    (t (let ((path (%find-on-path name)))
-         (if path (format nil "~A is ~A" name path)
-             (format nil "~A: not found" name))))))
-
-(define-builtin "type" (lambda (args) (mapcar #'%classify-command args)))
-
-(define-builtin "which"
-  (lambda (args)
-    (loop for name in args
-          collect (or (%find-on-path name) (format nil "~A: not found" name)))))
-
-;;; --- source: run a script of shell lines ---------------------------------
-
-(define-builtin "source"
-  (lambda (args)
-    (let ((file (and args (probe-file (merge-pathnames (%expand-tilde (first args))
-                                                       *current-directory*)))))
-      (unless file
-        (error 'shell-parse-error :line
-               (format nil "source: no such file: ~A" (or (first args) ""))))
-      (with-open-file (s file)
-        (loop for line = (read-line s nil nil) while line
-              for trimmed = (string-trim '(#\Space #\Tab) line)
-              unless (or (zerop (length trimmed)) (char= (char trimmed 0) #\#))
-                do (shell-eval line)))
-      (values))))
-
-(define-builtin "." (builtin "source"))
 
 ;;; ---------------------------------------------------------------------------
 ;;; History (SPEC §1: a sequence of (form . result), results hold live objects)
@@ -1055,195 +826,6 @@ prints one element per line; a scalar prints readably.  Returns no values."
     (t (format out "~&~S~%" result)))
   (values))
 
-;;; ---------------------------------------------------------------------------
-;;; Syntax highlighting (as-you-type colouring of the line)
-;;; ---------------------------------------------------------------------------
-;;;
-;;; The escapes carry zero visible width, so the line editor's cursor math (which
-;;; counts characters of the raw text) is unaffected.  It must never error on a
-;;; partial line, so the whole thing is wrapped and falls back to the raw text.
-
-(defvar *highlight* t
-  "When true, the line editor colours the command line as you type: the command
-green when it resolves (red when it doesn't), strings yellow, operators and
-$VARs cyan.")
-
-(let ((cache nil))
-  (defun %path-command-set (&optional refresh)
-    "A memoized hash-set of every executable name on $PATH — so highlighting can
-tell a valid command from an invalid one without scanning $PATH per keystroke.
-Pass REFRESH to rebuild it (e.g. after changing $PATH)."
-    (when (or refresh (null cache))
-      (let ((set (make-hash-table :test 'equal))
-            (path (sb-ext:posix-getenv "PATH")))
-        (when path
-          (dolist (dir (%split-string path #\:))
-            (when (plusp (length dir))
-              (dolist (p (ignore-errors
-                          (directory (merge-pathnames (make-pathname :name :wild :type :wild)
-                                                      (%as-directory dir)))))
-                (setf (gethash (file-namestring p) set) t)))))
-        (setf cache set)))
-    cache))
-
-(defun %command-known-p (name)
-  "True when NAME resolves to something runnable: a builtin, alias, wrapper, an
-existing path (if it contains /), or an executable on $PATH."
-  (or (builtin-p name)
-      (nth-value 1 (gethash name *aliases*))
-      (nth-value 1 (gethash name *wrappers*))
-      (if (find #\/ name)
-          (and (%safe-probe (merge-pathnames name *current-directory*)) t)
-          (and (gethash name (%path-command-set)) t))))
-
-(defun %sgr (code string)
-  (format nil "~C[~Dm~A~C[0m" #\Escape code string #\Escape))
-
-(defun %highlight (text)
-  "Return TEXT with ANSI colour escapes for the command word, strings, operators,
-and $VARs — adding no visible width.  Never errors: falls back to raw TEXT."
-  (if (not *highlight*)
-      text
-      (handler-case
-          (with-output-to-string (out)
-            (let ((n (length text)) (i 0))
-              ;; leading whitespace, then the command word coloured by validity
-              (loop while (and (< i n) (member (char text i) '(#\Space #\Tab)))
-                    do (write-char (char text i) out) (incf i))
-              (let ((start i))
-                (loop while (and (< i n) (not (member (char text i) +word-delimiters+)))
-                      do (incf i))
-                (when (> i start)
-                  (let ((word (subseq text start i)))
-                    (write-string (%sgr (if (%command-known-p word) 32 31) word) out))))
-              ;; the remainder: strings / operators / variables
-              (loop while (< i n) do
-                (let ((c (char text i)))
-                  (cond
-                    ((member c '(#\" #\'))                       ; quoted string -> yellow
-                     (let ((j (1+ i)))
-                       (loop while (and (< j n) (char/= (char text j) c)) do (incf j))
-                       (let ((end (min n (1+ j))))
-                         (write-string (%sgr 33 (subseq text i end)) out)
-                         (setf i end))))
-                    ((member c '(#\| #\< #\> #\&))               ; operator -> cyan
-                     (write-string (%sgr 36 (string c)) out) (incf i))
-                    ((char= c #\$)                               ; $VAR -> cyan
-                     (let ((j (1+ i)))
-                       (loop while (and (< j n)
-                                        (let ((d (char text j)))
-                                          (or (alphanumericp d) (member d '(#\_ #\{ #\})))))
-                             do (incf j))
-                       (write-string (%sgr 36 (subseq text i j)) out) (setf i j)))
-                    (t (write-char c out) (incf i)))))))
-        (error () text))))
-
-;;; ---------------------------------------------------------------------------
-;;; Completion (SPEC §1: completion is a generic function)
-;;; ---------------------------------------------------------------------------
-
-(defun %prefixp (prefix string)
-  (and (<= (length prefix) (length string))
-       (string= prefix string :end2 (length prefix))))
-
-(defgeneric complete (kind text &key &allow-other-keys)
-  (:documentation
-   "Return a sorted list of completions for TEXT in context KIND — one of
-:command (registered wrappers + PATH), :symbol (Lisp symbols), :path (files
-under a directory).  New contexts are new methods."))
-
-(defun %path-commands (prefix)
-  "Executable names on $PATH beginning with PREFIX."
-  (let ((path (sb-ext:posix-getenv "PATH"))
-        (names '()))
-    (when path
-      (dolist (dir (%split-string path #\:))
-        (when (plusp (length dir))
-          (dolist (p (ignore-errors
-                      (directory (merge-pathnames (make-pathname :name :wild :type :wild)
-                                                  (%as-directory dir)))))
-            (let ((name (file-namestring p)))
-              (when (and (plusp (length name)) (%prefixp prefix name))
-                (push name names)))))))
-    names))
-
-(defun %split-string (string char)
-  (loop with start = 0
-        for pos = (position char string :start start)
-        collect (subseq string start pos)
-        while pos do (setf start (1+ pos))))
-
-(defun %as-directory (namestring)
-  (if (and (plusp (length namestring))
-           (char= (char namestring (1- (length namestring))) #\/))
-      namestring
-      (concatenate 'string namestring "/")))
-
-(defmethod complete ((kind (eql :command)) text &key)
-  (let ((names '()))
-    (flet ((collect (table)
-             (maphash (lambda (k v) (declare (ignore v))
-                        (when (%prefixp text k) (push k names)))
-                      table)))
-      (collect *wrappers*) (collect *builtins*) (collect *aliases*))
-    (sort (remove-duplicates (append names (ignore-errors (%path-commands text)))
-                             :test #'string=)
-          #'string<)))
-
-(defmethod complete ((kind (eql :env)) text &key)
-  "Environment variable names beginning with TEXT (given without the leading $)."
-  (let ((out '()))
-    (dolist (entry (sb-ext:posix-environ))
-      (let* ((eq (position #\= entry))
-             (name (if eq (subseq entry 0 eq) entry)))
-        (when (%prefixp text name) (push name out))))
-    (sort (remove-duplicates out :test #'string=) #'string<)))
-
-(defmethod complete ((kind (eql :symbol)) text &key (package *package*))
-  (let ((up (string-upcase text)) (out '()))
-    (do-symbols (s package)
-      (when (%prefixp up (symbol-name s))
-        (push (string-downcase (symbol-name s)) out)))
-    (sort (remove-duplicates out :test #'string=) #'string<)))
-
-(defmethod complete ((kind (eql :path)) text &key (directory *current-directory*))
-  (let* ((slash (position #\/ text :from-end t))
-         (subdir (if slash (subseq text 0 (1+ slash)) ""))
-         (prefix (if slash (subseq text (1+ slash)) text))
-         ;; expand a leading ~ for the lookup, but keep the user's ~ in results
-         (base (merge-pathnames (if (plusp (length subdir)) (%expand-tilde subdir) "")
-                                directory))
-         (entries (ignore-errors
-                   (directory (merge-pathnames (make-pathname :name :wild :type :wild) base)))))
-    (sort
-     (loop for p in entries
-           for name = (%entry-name p)
-           when (%prefixp prefix name)
-             collect (concatenate 'string subdir name))
-     #'string<)))
-
-(defun %entry-name (pathname)
-  "The final component of PATHNAME, with a trailing / for directories."
-  (if (and (null (pathname-name pathname)) (pathname-directory pathname))
-      (concatenate 'string (car (last (pathname-directory pathname))) "/")
-      (file-namestring pathname)))
-
-(defun complete-line (line)
-  "Complete the last token of LINE, choosing the context: the first word is a
-command, a `,`/`(`-led token is a symbol, otherwise a path."
-  (let* ((trimmed (string-left-trim '(#\Space #\Tab) line))
-         (last-space (position-if (lambda (c) (member c '(#\Space #\Tab #\|)))
-                                  trimmed :from-end t))
-         (token (if last-space (subseq trimmed (1+ last-space)) trimmed)))
-    (cond ;; $VAR — environment variable names (but not a $(...) Lisp escape)
-          ((and (plusp (length token)) (char= (char token 0) #\$)
-                (not (and (> (length token) 1) (char= (char token 1) #\())))
-           (mapcar (lambda (n) (concatenate 'string "$" n))
-                   (complete :env (subseq token 1))))
-          ((null last-space) (complete :command token))
-          ((and (plusp (length token)) (member (char token 0) '(#\, #\()))
-           (complete :symbol (string-left-trim ",(" token)))
-          (t (complete :path token)))))
 
 ;;; The REPL (shell-repl / main) lives in lineedit.lisp, which loads after this
 ;;; file and adds the interactive line editor it uses.

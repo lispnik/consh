@@ -37,6 +37,9 @@
                (:file "exec")
                (:file "jobs")
                (:file "surface")
+               (:file "highlight")
+               (:file "complete")
+               (:file "builtins")
                (:file "lineedit"))
   :in-order-to ((test-op (test-op "consh/test"))))
 
