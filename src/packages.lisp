@@ -25,9 +25,10 @@
    #:c-kill #:c-killpg #:c-setpgid #:c-getpgid
    #:c-tcsetpgrp #:c-tcgetpgrp #:c-isatty #:with-signal-ignored
    #:save-termios #:restore-termios #:c-poll-readable
+   #:c-poll-two #:c-write-byte #:c-drain-fd #:set-nonblocking
    ;; signal numbers commonly used
    #:+sigterm+ #:+sigkill+ #:+sigcont+ #:+sigstop+ #:+sigtstp+ #:+sigint+ #:+sigchld+
-   #:+sigttin+ #:+sigttou+))
+   #:+sigttin+ #:+sigttou+ #:+sigwinch+))
 
 (defpackage #:consh
   (:use #:cl #:consh.ffi)

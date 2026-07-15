@@ -28,6 +28,24 @@ previous SIGTTOU disposition afterward."
     ;; a second use still works — disposition was restored, not left as SIG_IGN
     (is (eq :ok (with-signal-ignored (+sigttou+) :ok)))))
 
+(test self-pipe-poll-two-and-drain
+  "The SIGWINCH self-pipe primitives: c-poll-two selects the ready fd (first
+preferred), c-write-byte wakes it, and c-drain-fd empties a non-blocking pipe."
+  (multiple-value-bind (r1 w1) (make-pipe)
+    (multiple-value-bind (r2 w2) (make-pipe)
+      (unwind-protect
+           (progn
+             (is-true (set-nonblocking r1))
+             (is-true (set-nonblocking r2))
+             (is (null (c-poll-two r1 r2 30)))          ; neither ready -> timeout
+             (is-true (c-write-byte w2))
+             (is (eq :second (c-poll-two r1 r2 200)))    ; only the second fd is ready
+             (is-true (c-write-byte w1))
+             (is (eq :first (c-poll-two r1 r2 200)))      ; first is preferred
+             (c-drain-fd r1) (c-drain-fd r2)
+             (is (null (c-poll-two r1 r2 30))))          ; drained -> timeout again
+        (mapc #'c-close (list r1 w1 r2 w2))))))
+
 (test pipe-and-cloexec
   "make-pipe returns two usable fds with FD_CLOEXEC set by default."
   (multiple-value-bind (r w) (make-pipe)

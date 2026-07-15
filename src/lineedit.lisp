@@ -807,6 +807,53 @@ cursor to its (row, column).  Row/column state is remembered on ED."
     (when (plusp below) (format out "~C[~DB" #\Escape below)))
   (write-char #\Return out))
 
+;;; --- SIGWINCH via a self-pipe ---------------------------------------------
+;;; The read loop poll(2)s the terminal AND a pipe; the SIGWINCH handler writes
+;;; one byte to the pipe, so a terminal resize wakes the poll deterministically
+;;; (unlike a bare EINTR, which the poll must retry to survive the reaper's
+;;; SIGCHLD).  The loop then re-measures the terminal and repaints at the new
+;;; width.
+
+(defvar *winch-write-fd* nil
+  "Write end of the SIGWINCH self-pipe while a line is being edited, else NIL.")
+
+(defvar *winch-installed* nil "T once the SIGWINCH handler has been installed.")
+
+(defun %winch-handler (&rest args)
+  (declare (ignore args))
+  (when *winch-write-fd* (ignore-errors (c-write-byte *winch-write-fd*))))
+
+(defun %ensure-winch-handler ()
+  "Install the SIGWINCH handler once; it no-ops unless a line edit is active."
+  (unless *winch-installed*
+    (ignore-errors (sb-sys:enable-interrupt +sigwinch+ #'%winch-handler))
+    (setf *winch-installed* t)))
+
+(defun %wait-for-input (in fd winch-fd)
+  "Block until a key can be read from FD (or SBCL has one buffered) or a resize
+byte arrives on WINCH-FD.  Returns :KEY or :RESIZED.  With no terminal fd (a
+string stream, in tests) or no self-pipe, always :KEY (the caller then blocks in
+the ordinary read)."
+  (cond
+    ((or (null fd) (null winch-fd)) :key)
+    ((listen in) :key)                          ; SBCL already buffered a key
+    (t (loop (case (c-poll-two fd winch-fd -1)
+               (:first  (return :key))
+               (:second (return :resized))
+               (t nil))))))                       ; spurious wake: keep waiting
+
+(defun %hard-repaint (ed prompt out cols)
+  "Repaint from scratch after a resize: go to the top of the input area, clear
+downward, drop the stale wrap bookkeeping, and redraw at the new width."
+  (let ((up (ledit-render-crow ed)))
+    (write-char #\Return out)                           ; column 0
+    (when (plusp up) (format out "~C[~DA" #\Escape up))  ; up to the first row
+    (format out "~C[J" #\Escape))                       ; clear to end of screen
+  (setf (ledit-render-oldrows ed) 0
+        (ledit-render-oldpos ed) 0
+        (ledit-render-crow ed) 0)
+  (%redraw ed prompt out cols))
+
 (defun %search-prompt (ed)
   "The transient prompt shown during ^R reverse-search, e.g.
 `(reverse-i-search)`git': `; `failed ` prefixes it when the query matches nothing."
@@ -820,22 +867,38 @@ Returns the line string, NIL on EOF, or (when ABORT-ON-CANCEL) :cancelled if the
 line was aborted with ^C — used to bail out of a multi-line continuation."
   (let* ((ed (make-ledit))
          (fd (%terminal-fd-of in))
-         ;; terminal width for wrapping long lines (re-queried per line so a
-         ;; between-lines resize is picked up); fall back to 80 columns
+         ;; terminal width for wrapping long lines; re-queried on SIGWINCH
          (cols (or (%query-terminal-columns) 80))
+         ;; SIGWINCH self-pipe (only with a real terminal): the handler writes a
+         ;; byte to WINCH-WRITE, the read loop watches WINCH-READ alongside the tty
+         (winch (and fd (ignore-errors (multiple-value-list (make-pipe)))))
+         (winch-read (first winch))
+         (winch-write (second winch))
          ;; snapshot the exact terminal state so we can restore it with a single
          ;; tcsetattr syscall — robust against a preempted `stty sane` subprocess
          (saved (and fd (save-termios fd))))
+    (when winch
+      (set-nonblocking winch-read)          ; so draining an empty pipe won't block
+      (set-nonblocking winch-write)          ; so the handler's write can't block
+      (%ensure-winch-handler))
     (flet ((repaint ()
              ;; while searching, the prompt becomes the incremental-search prompt
              (%redraw ed (if (ledit-searching ed) (%search-prompt ed) prompt) out cols)))
       (%stty '("-echo" "-icanon" "min" "1" "time" "0"))
       (format out "~C[?2004h" #\Escape)      ; enable bracketed paste
       (finish-output out)
-      (unwind-protect
+      (let ((*winch-write-fd* winch-write))   ; the handler writes here while we edit
+       (unwind-protect
            (progn
              (repaint)
              (loop
+               (if (and winch-read
+                        (eq :resized (%wait-for-input in fd winch-read)))
+                 ;; terminal resized: drain the pipe, re-measure, repaint fresh
+                 (progn (c-drain-fd winch-read)
+                        (setf cols (or (%query-terminal-columns) cols))
+                        (%hard-repaint ed (if (ledit-searching ed) (%search-prompt ed) prompt)
+                                       out cols))
                (let ((action (ledit-key ed (%read-key in fd))))
                  (case action
                    (:submit (%end-of-content ed out) (format out "~%")
@@ -861,13 +924,16 @@ line was aborted with ^C — used to bail out of a multi-line continuation."
                         (setf (ledit-render-oldrows ed) 0
                               (ledit-render-oldpos ed) 0
                               (ledit-render-crow ed) 0))
-                      (repaint))))))
-        (format out "~C[?2004l" #\Escape)    ; disable bracketed paste
-        (finish-output out)
-        ;; restore the captured attributes atomically; fall back to `stty sane`
-        ;; only if we could not snapshot them
-        (unless (and fd saved (restore-termios fd saved))
-          (%stty '("sane")))))))
+                      (repaint)))))))
+         (format out "~C[?2004l" #\Escape)    ; disable bracketed paste
+         (finish-output out)
+         ;; restore the captured attributes atomically; fall back to `stty sane`
+         ;; only if we could not snapshot them
+         (unless (and fd saved (restore-termios fd saved))
+           (%stty '("sane")))
+         (when winch                          ; close the SIGWINCH self-pipe
+           (ignore-errors (c-close winch-read))
+           (ignore-errors (c-close winch-write))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The REPL

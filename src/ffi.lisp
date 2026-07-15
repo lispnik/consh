@@ -100,6 +100,7 @@
 (defconstant +sigchld+ (if (member :darwin *features*) 20 17))
 (defconstant +sigttin+ 21)              ; same on Linux and macOS
 (defconstant +sigttou+ 22)
+(defconstant +sigwinch+ 28)             ; terminal resize; 28 on Linux and macOS
 
 (defmacro with-signal-ignored ((signum) &body body)
   "Run BODY with SIGNUM set to SIG_IGN, restoring the previous disposition after.
@@ -291,6 +292,52 @@ revents } — same 8-byte layout on Linux and macOS."
           ((= rc 0) (return nil))                        ; timeout
           ((eql (get-errno) +eintr+))                    ; interrupted: retry
           (t (return nil)))))))                          ; other error
+
+(defun c-poll-two (fd1 fd2 timeout-ms)
+  "poll(2) two fds for input for up to TIMEOUT-MS (-1 blocks).  Retries EINTR so
+the reaper's SIGCHLD can't return spuriously.  Returns :FIRST if FD1 has an event
+\(POLLIN or a hangup — so the caller reads and sees EOF), :SECOND if only FD2
+does, or NIL on timeout.  Used to watch the terminal and the SIGWINCH self-pipe
+at once.  Two contiguous 8-byte pollfds."
+  (cffi:with-foreign-object (pfd :uint8 16)
+    (setf (cffi:mem-ref pfd :int 0) fd1
+          (cffi:mem-ref (cffi:inc-pointer pfd 4) :short 0) +pollin+
+          (cffi:mem-ref (cffi:inc-pointer pfd 6) :short 0) 0
+          (cffi:mem-ref (cffi:inc-pointer pfd 8) :int 0) fd2
+          (cffi:mem-ref (cffi:inc-pointer pfd 12) :short 0) +pollin+
+          (cffi:mem-ref (cffi:inc-pointer pfd 14) :short 0) 0)
+    (loop
+      (let ((rc (cffi:foreign-funcall "poll"
+                                      :pointer pfd :unsigned-long 2 :int timeout-ms :int)))
+        (cond
+          ((> rc 0)
+           (return (cond ((not (zerop (cffi:mem-ref (cffi:inc-pointer pfd 6) :short 0))) :first)
+                         ((not (zerop (cffi:mem-ref (cffi:inc-pointer pfd 14) :short 0))) :second)
+                         (t nil))))
+          ((= rc 0) (return nil))                        ; timeout
+          ((eql (get-errno) +eintr+))                    ; interrupted: retry
+          (t (return nil)))))))                          ; other error
+
+(defun c-write-byte (fd)
+  "write(2) a single 0 byte to FD.  Best-effort (returns T on success), and small
+enough to call from a signal handler — the SIGWINCH self-pipe wakeup."
+  (cffi:with-foreign-object (b :uint8 1)
+    (setf (cffi:mem-ref b :uint8 0) 0)
+    (= 1 (cffi:foreign-funcall "write" :int fd :pointer b :unsigned-long 1 :int))))
+
+(defun c-drain-fd (fd)
+  "read(2) and discard all currently-available bytes from FD (which must be
+non-blocking, so an empty read returns EAGAIN and stops the loop)."
+  (cffi:with-foreign-object (buf :uint8 64)
+    (loop while (plusp (cffi:foreign-funcall "read"
+                                             :int fd :pointer buf :unsigned-long 64 :int)))))
+
+(defun set-nonblocking (fd)
+  "Set O_NONBLOCK on FD (via sb-posix fcntl).  Returns T on success."
+  (ignore-errors
+    (sb-posix:fcntl fd sb-posix:f-setfl
+                    (logior (sb-posix:fcntl fd sb-posix:f-getfl) sb-posix:o-nonblock))
+    t))
 
 ;;; termios save/restore — we treat the struct as an opaque blob (no field
 ;;; access), so no platform-specific layout is needed.  +termios-size+ is a safe
