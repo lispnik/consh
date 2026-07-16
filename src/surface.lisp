@@ -686,11 +686,12 @@ or for a pure-Lisp pipeline (no process group).  Records the exit status in
   "Read exactly one Lisp form from a `(`-line.  Signals a clean SHELL-PARSE-ERROR
 on an unbalanced form (else a raw END-OF-FILE leaks) OR on trailing text after
 the form (which would otherwise be silently dropped — e.g. `(+ 1 2) rm -rf /`
-running only the first form)."
+running only the first form).  A trailing `;` comment after the form is allowed."
   (handler-case
       (multiple-value-bind (form pos) (read-from-string trimmed)
         (let ((rest (string-trim '(#\Space #\Tab #\Newline) (subseq trimmed pos))))
-          (unless (zerop (length rest))
+          ;; trailing text is an error, except a `;` line comment after the form
+          (unless (or (zerop (length rest)) (char= (char rest 0) #\;))
             (error 'shell-parse-error :line trimmed))
           form))
     ;; an unbalanced form runs out of input: incomplete, not a hard error

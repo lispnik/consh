@@ -595,7 +595,9 @@ matcher's (length name))."
   (signals shell-parse-error (shell-eval "(+ 1 2" :record nil))       ; unbalanced
   (signals shell-parse-error (shell-eval "(+ 1 2) rm -rf /" :record nil)) ; trailing
   ;; a well-formed single form still evaluates
-  (is (= 3 (shell-eval "(+ 1 2)" :record nil))))
+  (is (= 3 (shell-eval "(+ 1 2)" :record nil)))
+  ;; a trailing `;` comment after the form is allowed (needed by scripts)
+  (is (= 3 (shell-eval "(+ 1 2) ; add them up" :record nil))))
 
 ;;; ===========================================================================
 ;;; Builtins
